@@ -22,7 +22,7 @@ A messenger where you can chat with a random stranger, and if a **match** happen
 | Feature | Status |
 |---|---|
 | Auth: register / login / logout · `scrypt` + httpOnly cookie | ✅ done |
-| Real-time chat & messages (Socket.IO) | 🚧 next up |
+| Real-time chat & messages (Socket.IO) | ✅ done |
 | Random strangers & matching | 🎯 planned |
 | Media / voice messages / message statuses | 🎯 planned |
 
@@ -45,8 +45,8 @@ Priority legend: 🟣 **core** (can't pass without it) · ⚪ **leftover** (only
 | Day | What we build | Priority |
 |---|---|---|
 | **1** ✅ | Skeleton: Docker Compose, auth (`scrypt` + httpOnly), migrations, Telegram-style UI shell + random-chat stub | 🟣 |
-| **2** | `conversations` + `messages` model (migration 002), REST API for chats and messages | 🟣 |
-| **3** | Realtime via Socket.IO: socket auth by session, rooms, `message:new` event, persistence to DB, wiring the UI instead of local echo | 🟣 |
+| **2** ✅ | `conversations` + `messages` model (migration 002), REST API for chats and messages | 🟣 |
+| **3** ✅ | Realtime via Socket.IO: socket auth by session, rooms, `message:new` event, persistence to DB | 🟣 |
 | **4** | Chats and contacts from the DB: `contacts` model, a real list instead of the stub (preview, time, sorting) | 🟣 |
 | **5** | Random stranger: in-memory matchmaking queue (`stranger:search` → `stranger:matched`), ephemeral chat, anonymous handle + emoji avatar | 🟣 |
 | **6** | Matching: `matches` table, mutual `match:request` → upgrade the chat to a contact and reveal usernames; "next stranger" closes the ephemeral chat | 🟣 |
@@ -133,6 +133,30 @@ Open **http://localhost:5173**. (Kill the docker stack first if ports are taken:
 | POST | `/api/auth/login` | sign in |
 | POST | `/api/auth/logout` | sign out |
 | GET | `/api/auth/me` | current user (via cookie) |
+| GET | `/api/conversations` | user's conversations (with participant and last message preview) |
+| POST | `/api/conversations` | `{ username }` — find or create direct conversation |
+| GET | `/api/conversations/:id` | conversation details (participant only) |
+| GET | `/api/conversations/:id/messages` | message history; pagination `?limit=50&before=<id>` |
+| POST | `/api/conversations/:id/messages` | `{ body }` — send a message |
+
+### Socket.IO (Realtime)
+
+Connection: `ws://<host>/socket.io` (or `http://<host>/socket.io` for polling).  
+Authentication: automatic via httpOnly `sid` cookie (handshake). Unauthenticated connections are rejected (`Error: Не авторизовано`).
+
+#### Client Events (Client → Server)
+
+| Event | Payload | Ack Response | Description |
+|---|---|---|---|
+| `conversation:join` | `{ conversationId }` | `{ ok: true }` or `{ ok: false, error }` | Join room `conversation:<id>` (participants only) |
+| `conversation:leave` | `{ conversationId }` | `{ ok: true }` | Leave conversation room |
+| `message:send` | `{ conversationId, body }` | `{ ok: true, message }` or `{ ok: false, error }` | Persist message to DB and broadcast to room |
+
+#### Server Events (Server → Client)
+
+| Event | Payload | Description |
+|---|---|---|
+| `message:new` | `{ message }` | New message in the conversation room (emitted to all room participants) |
 
 ## Structure
 

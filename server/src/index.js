@@ -5,8 +5,10 @@ import express from 'express';
 import cookieParser from 'cookie-parser';
 import { Server } from 'socket.io';
 import { authRouter } from './routes/auth.js';
+import { conversationsRouter } from './routes/conversations.js';
 import { attachUser } from './middleware/auth.js';
 import { pool } from './db.js';
+import { setupSocket } from './socket.js';
 
 const app = express();
 app.use(express.json());
@@ -23,6 +25,7 @@ app.get('/health', async (_req, res) => {
 
 app.use(attachUser);
 app.use('/api/auth', authRouter);
+app.use('/api/conversations', conversationsRouter);
 
 // У проді цей же сервер віддає зібраний фронтенд (client/dist)
 const clientDist = path.resolve(import.meta.dirname, '../../client/dist');
@@ -39,9 +42,8 @@ export const io = new Server(server, {
   cors: { origin: true, credentials: true },
 });
 
-io.on('connection', () => {
-  // Сюди прийдуть події чату: new_message, typing, read, stranger-метчинг
-});
+app.set('io', io);
+setupSocket(io);
 
 const port = Number(process.env.PORT || 3001);
 server.listen(port, () => {

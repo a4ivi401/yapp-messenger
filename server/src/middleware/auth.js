@@ -2,8 +2,10 @@ import { query } from '../db.js';
 
 export const SESSION_COOKIE = 'sid';
 
-async function loadSession(req) {
-  const token = req.cookies?.[SESSION_COOKIE];
+/**
+ * Знаходить активну сесію та користувача за токеном.
+ */
+export async function findSessionUser(token) {
   if (!token) return null;
   const { rows } = await query(
     `SELECT s.token, s.expires_at, u.id AS user_id, u.username
@@ -13,6 +15,11 @@ async function loadSession(req) {
     [token],
   );
   return rows[0] ?? null;
+}
+
+async function loadSession(req) {
+  const token = req.cookies?.[SESSION_COOKIE];
+  return findSessionUser(token);
 }
 
 /** Ставить req.user (може бути null) для будь-якого запиту. */

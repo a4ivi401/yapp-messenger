@@ -1,0 +1,147 @@
+import { Router } from 'express';
+import { z } from 'zod';
+import { requireAuth } from '../middleware/auth.js';
+import { query } from '../db.js';
+import {
+  findOrCreateDirectConversation,
+  getConversationForUser,
+  isParticipant,
+  listConversationsForUser,
+  listMessages,
+  createMessage,
+} from '../conversations.js';
+
+// Express 4 не передає помилки з async-обробників у error-middleware (а глобального тут і немає),
+// тож обгортаємо кожен хендлер, щоб кинута помилка не стала unhandled rejection.
+const asyncHandler = (fn) => (req, res, next) =>
+  Promise.resolve(fn(req, res, next)).catch((err) => {
+    console.error(err);
+    if (!res.headersSent) res.status(500).json({ error: 'Внутрішня помилка' });
+  });
+
+const uuid = z.string().uuid();
+
+const createConversationSchema = z.object({
+  username: z.string().trim().min(3).max(20),
+});
+
+const messageSchema = z.object({
+  body: z.string().trim().min(1).max(4000),
+});
+
+const listMessagesQuerySchema = z.object({
+  limit: z.coerce.number().int().min(1).max(100).default(50),
+  before: z.string().uuid().optional(),
+});
+
+export const conversationsRouter = Router();
+
+// Усі маршрути діалогів доступні лише авторизованим користувачам.
+conversationsRouter.use(requireAuth);
+
+// GET /api/conversations — список діалогів поточного користувача
+conversationsRouter.get(
+  '/',
+  asyncHandler(async (req, res) => {
+    const conversations = await listConversationsForUser(req.user.user_id);
+    res.json({ conversations });
+  }),
+);
+
+// POST /api/conversations — почати (або відкрити наявний) прямий діалог за username
+conversationsRouter.post(
+  '/',
+  asyncHandler(async (req, res) => {
+    const parsed = createConversationSchema.safeParse(req.body);
+    if (!parsed.success) {
+      return res.status(400).json({ error: parsed.error.issues[0].message });
+    }
+
+    const me = req.user.user_id;
+    const { rows } = await query('SELECT id FROM users WHERE username = $1', [
+      parsed.data.username,
+    ]);
+    const target = rows[0];
+    if (!target) {
+      return res.status(404).json({ error: 'Користувача не знайдено' });
+    }
+    if (target.id === me) {
+      return res.status(400).json({ error: 'Не можна почати діалог із самим собою' });
+    }
+
+    const { id, created } = await findOrCreateDirectConversation(me, target.id);
+    const conversation = await getConversationForUser(id, me);
+    res.status(created ? 201 : 200).json({ conversation });
+  }),
+);
+
+// GET /api/conversations/:id — деталі діалогу (лише для учасника)
+conversationsRouter.get(
+  '/:id',
+  asyncHandler(async (req, res) => {
+    if (!uuid.safeParse(req.params.id).success) {
+      return res.status(404).json({ error: 'Діалог не знайдено' });
+    }
+    const conversation = await getConversationForUser(req.params.id, req.user.user_id);
+    if (!conversation) {
+      return res.status(404).json({ error: 'Діалог не знайдено' });
+    }
+    res.json({ conversation });
+  }),
+);
+
+// GET /api/conversations/:id/messages — історія повідомлень (пагінація курсором before)
+conversationsRouter.get(
+  '/:id/messages',
+  asyncHandler(async (req, res) => {
+    if (!uuid.safeParse(req.params.id).success) {
+      return res.status(404).json({ error: 'Діалог не знайдено' });
+    }
+    const parsed = listMessagesQuerySchema.safeParse(req.query);
+    if (!parsed.success) {
+      return res.status(400).json({ error: parsed.error.issues[0].message });
+    }
+
+    if (!(await isParticipant(req.params.id, req.user.user_id))) {
+      return res.status(404).json({ error: 'Діалог не знайдено' });
+    }
+
+    try {
+      const result = await listMessages(req.params.id, parsed.data);
+      res.json(result);
+    } catch (err) {
+      if (err.code === 'INVALID_CURSOR') {
+        return res.status(400).json({ error: 'Невірний курсор' });
+      }
+      throw err;
+    }
+  }),
+);
+
+// POST /api/conversations/:id/messages — надіслати повідомлення (persist; realtime додамо в Day 3)
+conversationsRouter.post(
+  '/:id/messages',
+  asyncHandler(async (req, res) => {
+    if (!uuid.safeParse(req.params.id).success) {
+      return res.status(404).json({ error: 'Діалог не знайдено' });
+    }
+    const parsed = messageSchema.safeParse(req.body);
+    if (!parsed.success) {
+      return res.status(400).json({ error: parsed.error.issues[0].message });
+    }
+
+    const me = req.user.user_id;
+    if (!(await isParticipant(req.params.id, me))) {
+      return res.status(404).json({ error: 'Діалог не знайдено' });
+    }
+
+    const message = await createMessage(req.params.id, me, parsed.data.body);
+
+    const io = req.app.get('io');
+    if (io) {
+      io.to(`conversation:${req.params.id}`).emit('message:new', { message });
+    }
+
+    res.status(201).json({ message });
+  }),
+);
