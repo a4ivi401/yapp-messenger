@@ -25,7 +25,7 @@ A messenger where you can chat with a random stranger, and if a **match** happen
 | Real-time chat & messages (Socket.IO) | ✅ done |
 | Chats and contacts from DB + username search | ✅ done |
 | Browser & audio chime notifications (Web Audio & Notifications API) | ✅ done |
-| Random strangers & matching | 🎯 planned |
+| Random anonymous chat, session exclusion & mutual match | ✅ done |
 | Media / voice messages / message statuses | 🎯 planned |
 
 ## Roadmap (2 weeks · ~2 h/day ≈ 28 h)
@@ -36,8 +36,8 @@ A messenger where you can chat with a random stranger, and if a **match** happen
 |---|---|---|---|
 | **M0** | Project skeleton + auth | 1 | ✅ done |
 | **M1** | Live chat — the messenger core | 2–4 | ✅ done |
-| **M2** | Random stranger + matching (**twist**) | 5–6 | 🎯 next |
-| **M3** | Statuses, media & extras | 7–11 | 🎯 planned |
+| **M2** | Random stranger + matching (**twist**) | 5–6 | ✅ done (Day 5) |
+| **M3** | Statuses, media & extras | 7–11 | 🎯 next |
 | **M4** | Deployment & defense prep | 12–14 | 🎯 planned |
 
 ### 📅 Day-by-day
@@ -50,8 +50,8 @@ Priority legend: 🟣 **core** (can't pass without it) · ⚪ **leftover** (only
 | **2** ✅ | `conversations` + `messages` model (migration 002), REST API for chats and messages | 🟣 |
 | **3** ✅ | Realtime via Socket.IO: socket auth by session, rooms, `message:new` event, persistence to DB | 🟣 |
 | **4** ✅ | Chats and contacts from the DB: `contacts` model (migration 003), username search, audio chime & system notifications | 🟣 |
-| **5** | Random stranger: in-memory matchmaking queue (`stranger:search` → `stranger:matched`), ephemeral chat, anonymous handle + emoji avatar | 🟣 |
-| **6** | Matching: `matches` table, mutual `match:request` → upgrade the chat to a contact and reveal usernames; "next stranger" closes the ephemeral chat | 🟣 |
+| **5** ✅ | Random stranger: in-memory matchmaking queue (FIFO), session exclusion prevention, anonymous personas, ephemeral chat & mutual match to contacts | 🟣 |
+| **6** | Matching enhancements: matchmaking filters, metrics and transition polish | 🟣 |
 | **7** | "Delivered / read" statuses + "typing…" indicator over the socket | 🟣 minimum |
 | **8** | Media: photos & files (`multer`, `uploads` volume), image previews | ⚪ |
 | **9** | Voice messages (MediaRecorder: record → upload → playback) | ⚪ |
@@ -159,12 +159,24 @@ Upon connection, each authenticated user automatically joins their own private r
 | `conversation:join` | `{ conversationId }` | `{ ok: true }` or `{ ok: false, error }` | Join room `conversation:<id>` (participants only) |
 | `conversation:leave` | `{ conversationId }` | `{ ok: true }` | Leave conversation room |
 | `message:send` | `{ conversationId, body }` | `{ ok: true, message }` or `{ ok: false, error }` | Persist message to DB and broadcast to conversation room & participant private rooms |
+| `stranger:search` | — | `{ ok: true, status }` | Start searching for a random stranger or enter the FIFO queue |
+| `stranger:cancel` | — | `{ ok: true }` | Cancel search and remove from queue |
+| `stranger:message` | `{ sessionId, body }` | `{ ok: true, message }` | Send an ephemeral message to the stranger (up to 4000 characters) |
+| `stranger:next` | — | `{ ok: true, status }` | Skip current stranger («🎲 Next»): record session exclusion to prevent re-matching and search for a new partner |
+| `stranger:leave` | — | `{ ok: true }` | Leave stranger chat and mark mutual exclusion in session |
+| `stranger:match-request` | `{ sessionId }` | `{ ok: true, mutual }` | Send contact request («🤝 Add to contacts»). When mutual, saves messages to DB and reveals identities |
 
 #### Server Events (Server → Client)
 
 | Event | Payload | Description |
 |---|---|---|
 | `message:new` | `{ message }` | New message with enriched attributes (including `senderUsername`). Emitted to `conversation:<id>` and recipients' private rooms `user:<userId>` for sidebar refresh, audio chimes, and browser notifications |
+| `stranger:matched` | `{ sessionId, myAnon, partner }` | Stranger matched! Emits anonymous personas without real usernames |
+| `stranger:message` | `{ message }` | Ephemeral message delivered in room `stranger:<sessionId>` |
+| `stranger:match-invited` | `{ sessionId }` | Partner sent an invitation to exchange contacts |
+| `stranger:revealed` | `{ sessionId, conversationId, conversation, partner }` | Mutual match! Real usernames revealed, chat converted to permanent contact |
+| `stranger:left` | `{ sessionId, reason }` | Partner left or skipped to another stranger (`reason: 'next' \| 'left' \| 'disconnected'`) |
+| `contact:new` | `{ contact }` | New contact added to user's list after mutual match |
 
 ## Structure
 

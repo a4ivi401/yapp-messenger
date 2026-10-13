@@ -575,6 +575,21 @@ body {
   cursor: default;
 }
 
+.match-action-btn.is-invited {
+  background: linear-gradient(135deg, #10b981, #059669);
+  animation: invite-glow 1.8s infinite;
+}
+
+@keyframes invite-glow {
+  0%,
+  100% {
+    box-shadow: 0 0 0 0 rgba(16, 185, 129, 0.5);
+  }
+  50% {
+    box-shadow: 0 0 0 8px rgba(16, 185, 129, 0);
+  }
+}
+
 .match-action-btn.is-matched {
   background: var(--online);
   cursor: default;
@@ -624,6 +639,131 @@ body {
   line-height: 1.45;
   color: #713f12;
   text-align: center;
+}
+
+/* Stranger searching radar pane */
+.stranger-searching-pane {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  padding: 32px 24px;
+  text-align: center;
+  background:
+    radial-gradient(circle at 50% 40%, rgba(124, 58, 237, 0.08), transparent 65%),
+    var(--chat-bg);
+}
+
+.searching-radar-wrap {
+  position: relative;
+  width: 140px;
+  height: 140px;
+  display: grid;
+  place-items: center;
+  margin-bottom: 24px;
+}
+
+.radar-center-icon {
+  width: 64px;
+  height: 64px;
+  border-radius: 50%;
+  background: linear-gradient(135deg, var(--accent), #9333ea);
+  color: #fff;
+  display: grid;
+  place-items: center;
+  font-size: 32px;
+  box-shadow: 0 8px 24px rgba(124, 58, 237, 0.4);
+  z-index: 2;
+  animation: radar-icon-bob 2.4s ease-in-out infinite;
+}
+
+@keyframes radar-icon-bob {
+  0%, 100% { transform: scale(1); }
+  50% { transform: scale(1.08); }
+}
+
+.radar-pulse-ring {
+  position: absolute;
+  inset: 0;
+  border-radius: 50%;
+  border: 2px solid var(--accent);
+  opacity: 0;
+  animation: radar-ring-pulse 2.4s cubic-bezier(0.2, 0.8, 0.2, 1) infinite;
+}
+
+.radar-pulse-ring.delay-1 {
+  animation-delay: 0.8s;
+}
+
+.radar-pulse-ring.delay-2 {
+  animation-delay: 1.6s;
+}
+
+@keyframes radar-ring-pulse {
+  0% {
+    transform: scale(0.4);
+    opacity: 0.8;
+  }
+  100% {
+    transform: scale(1.6);
+    opacity: 0;
+  }
+}
+
+.stranger-searching-pane h3 {
+  margin: 0 0 8px;
+  font-size: 20px;
+  color: var(--ink);
+}
+
+.stranger-searching-pane p {
+  margin: 0 0 20px;
+  color: var(--muted);
+  font-size: 14.5px;
+  max-width: 340px;
+  line-height: 1.5;
+}
+
+.cancel-search-btn {
+  border: 1px solid var(--border);
+  background: var(--panel);
+  color: var(--muted);
+  font-weight: 600;
+  font-size: 14px;
+  padding: 10px 22px;
+  border-radius: 999px;
+  cursor: pointer;
+  transition: all 0.15s;
+}
+
+.cancel-search-btn:hover {
+  background: var(--bg);
+  color: var(--error);
+  border-color: rgba(220, 38, 38, 0.3);
+}
+
+/* Stranger ended panel */
+.stranger-ended-panel {
+  flex-shrink: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  padding: 18px 20px;
+  background: var(--panel);
+  border-top: 1px solid var(--border);
+  text-align: center;
+}
+
+.stranger-ended-panel span {
+  font-size: 13.5px;
+  color: var(--muted);
+}
+
+.stranger-ended-panel .primary-pill-btn {
+  margin-top: 0;
 }
 
 /* Empty chat hint (no messages yet) */

@@ -45,12 +45,22 @@ export default function Home() {
   const [inputText, setInputText] = useState('');
   const [isLoadingMessages, setIsLoadingMessages] = useState(false);
 
-  // Заглушка стану анонімного чату
+  // Стан анонімного чату
+  const [strangerState, setStrangerState] = useState('idle'); // 'idle' | 'searching' | 'matched' | 'ended'
+  const [strangerSession, setStrangerSession] = useState(null); // { sessionId, myAnon, partner }
   const [matchRequested, setMatchRequested] = useState(false);
+  const [partnerMatchRequested, setPartnerMatchRequested] = useState(false);
+  const [strangerEndReason, setStrangerEndReason] = useState(null); // 'left' | 'next' | 'disconnected'
 
   // Refs для уникнення stale closures у слухачах Socket.IO
   const activeChatRef = useRef(activeChat);
   activeChatRef.current = activeChat;
+
+  const strangerStateRef = useRef(strangerState);
+  strangerStateRef.current = strangerState;
+
+  const strangerSessionRef = useRef(strangerSession);
+  strangerSessionRef.current = strangerSession;
 
   const conversationsRef = useRef(conversations);
   conversationsRef.current = conversations;
@@ -93,6 +103,18 @@ export default function Home() {
 
     if (prevChat?.type === 'direct' && socketRef.current) {
       socketRef.current.emit('conversation:leave', { conversationId: prevChat.id });
+    }
+    if (prevChat?.type === 'stranger' && socketRef.current) {
+      if (strangerStateRef.current === 'searching') {
+        socketRef.current.emit('stranger:cancel');
+      } else if (strangerStateRef.current === 'matched') {
+        socketRef.current.emit('stranger:leave');
+      }
+      setStrangerState('idle');
+      setStrangerSession(null);
+      setMatchRequested(false);
+      setPartnerMatchRequested(false);
+      setStrangerEndReason(null);
     }
 
     setActiveChat({
@@ -211,10 +233,183 @@ export default function Home() {
       });
     });
 
+    // ==========================================
+    // Випадковий анонімний співрозмовник (Stranger)
+    // ==========================================
+
+    // Підбір співрозмовника
+    socket.on('stranger:matched', ({ sessionId, myAnon, partner }) => {
+      setStrangerState('matched');
+      setStrangerSession({ sessionId, myAnon, partner });
+      setMatchRequested(false);
+      setPartnerMatchRequested(false);
+      setStrangerEndReason(null);
+
+      setActiveChat({
+        id: sessionId,
+        type: 'stranger',
+        title: `${partner.anonAvatar} ${partner.anonName}`,
+        avatar: partner.anonAvatar,
+        status: 'в мережі',
+      });
+
+      setMessages([
+        {
+          id: `sys-${Date.now()}`,
+          type: 'system',
+          body: `Співрозмовника знайдено! Ви — ${myAnon.anonAvatar} ${myAnon.anonName}, співрозмовник — ${partner.anonAvatar} ${partner.anonName}.`,
+          createdAt: new Date().toISOString(),
+        },
+      ]);
+
+      playNotificationSound();
+      showBrowserNotification({
+        title: 'Yapp: Співрозмовника знайдено!',
+        body: `Ваш співрозмовник — ${partner.anonAvatar} ${partner.anonName}`,
+      });
+    });
+
+    // Отримання анонімного повідомлення
+    socket.on('stranger:message', ({ message }) => {
+      if (!message) return;
+
+      const currentChat = activeChatRef.current;
+      const currentStranger = strangerSessionRef.current;
+
+      if (
+        currentChat?.type === 'stranger' &&
+        (currentChat.id === message.sessionId || currentStranger?.sessionId === message.sessionId)
+      ) {
+        setMessages((prev) => {
+          if (prev.some((m) => m.id === message.id)) return prev;
+          return [...prev, message];
+        });
+      }
+
+      if (message.senderId !== user.id) {
+        playNotificationSound();
+
+        const isUnfocused =
+          typeof document !== 'undefined' &&
+          (document.hidden || currentChat?.id !== message.sessionId);
+
+        if (isUnfocused) {
+          const senderLabel = message.senderAnonName
+            ? `${message.senderAnonAvatar || '🎭'} ${message.senderAnonName}`
+            : 'Анонім';
+          showBrowserNotification({
+            title: senderLabel,
+            body: message.body,
+          });
+        }
+      }
+    });
+
+    // Партнер надіслав запит на додавання в контакти
+    socket.on('stranger:match-invited', () => {
+      setPartnerMatchRequested(true);
+      playNotificationSound();
+      setMessages((prev) => [
+        ...prev,
+        {
+          id: `sys-invite-${Date.now()}`,
+          type: 'system',
+          body: '🤝 Співрозмовник хоче відкрити контакти! Натисніть «Додати в контакти», щоб познайомитись.',
+          createdAt: new Date().toISOString(),
+        },
+      ]);
+      showBrowserNotification({
+        title: 'Yapp: Запит на знайомство!',
+        body: 'Співрозмовник запропонував додати один одного в контакти.',
+      });
+    });
+
+    // Обопільна згода — розкриття нікнеймів та конвертація у постійний чат
+    socket.on('stranger:revealed', async ({ conversationId, partner }) => {
+      playNotificationSound();
+      setStrangerState('idle');
+      setStrangerSession(null);
+      setMatchRequested(false);
+      setPartnerMatchRequested(false);
+      setStrangerEndReason(null);
+
+      // Встановлюємо активний direct чат
+      setActiveChat({
+        id: conversationId,
+        type: 'direct',
+        title: `@${partner.username}`,
+        otherUser: partner,
+        status: 'в контактах',
+      });
+
+      // Приєднуємо сокет до постійної кімнати діалогу
+      if (socketRef.current) {
+        socketRef.current.emit('conversation:join', { conversationId });
+      }
+
+      // Отримуємо збережені повідомлення (включаючи ті, що були ефемерними)
+      try {
+        const res = await api.listMessages(conversationId);
+        setMessages([
+          ...(res.messages || []),
+          {
+            id: `sys-reveal-${Date.now()}`,
+            type: 'system',
+            success: true,
+            body: `🎉 Взаємна згода! Нікнейми відкрито: @${partner.username}. Діалог збережено в контактах.`,
+            createdAt: new Date().toISOString(),
+          },
+        ]);
+      } catch (err) {
+        console.error('Помилка завантаження повідомлень після розкриття:', err);
+      }
+
+      // Оновлюємо список діалогів і контактів у сайдбарі
+      loadInitialData();
+
+      showBrowserNotification({
+        title: 'Yapp: Взаємний контакт! 🎉',
+        body: `Ви та @${partner.username} обмінялися контактами!`,
+      });
+    });
+
+    // Співрозмовник завершив розмову
+    socket.on('stranger:left', ({ reason }) => {
+      setStrangerState('ended');
+      setStrangerEndReason(reason || 'left');
+
+      const reasonText =
+        reason === 'next'
+          ? 'Співрозмовник перейшов до іншого.'
+          : reason === 'disconnected'
+          ? 'Співрозмовник від’єднався.'
+          : 'Співрозмовник залишив чат.';
+
+      setMessages((prev) => [
+        ...prev,
+        {
+          id: `sys-left-${Date.now()}`,
+          type: 'system',
+          body: `${reasonText} Ви більше не зустрінетесь із ним у цій сесії.`,
+          createdAt: new Date().toISOString(),
+        },
+      ]);
+
+      setActiveChat((prev) =>
+        prev && prev.type === 'stranger' ? { ...prev, status: 'розмову завершено' } : prev,
+      );
+    });
+
+    // Сповіщення про новий контакт
+    socket.on('contact:new', () => {
+      setContactsCount((prev) => prev + 1);
+      loadInitialData();
+    });
+
     return () => {
       socket.disconnect();
     };
-  }, [user.id, openDirectConversation]);
+  }, [user.id, openDirectConversation, loadInitialData]);
 
   // Глобальний пошук користувачів із дебаунсом 250 мс
   useEffect(() => {
@@ -295,17 +490,18 @@ export default function Home() {
     setInputText('');
 
     if (activeChat.type === 'stranger') {
-      // Локальна заготовка для майбутнього анонімного чату
-      setMessages((prev) => [
-        ...prev,
-        {
-          id: `my-${Date.now()}`,
-          senderId: user.id,
-          senderUsername: user.username,
-          body: text,
-          createdAt: new Date().toISOString(),
-        },
-      ]);
+      const sessionId = strangerSessionRef.current?.sessionId || activeChat.id;
+      if (socketRef.current?.connected) {
+        socketRef.current.emit(
+          'stranger:message',
+          { sessionId, body: text },
+          (res) => {
+            if (!res?.ok) {
+              console.error('Помилка відправки повідомлення незнайомцю:', res?.error);
+            }
+          },
+        );
+      }
       return;
     }
 
@@ -332,46 +528,127 @@ export default function Home() {
     }
   };
 
-  // Випадковий співрозмовник
+  // Початок пошуку випадкового співрозмовника
   const startStrangerSearch = () => {
     const prevChat = activeChatRef.current;
     if (prevChat?.type === 'direct' && socketRef.current) {
       socketRef.current.emit('conversation:leave', { conversationId: prevChat.id });
     }
-    setActiveChat({
-      id: 'stranger-session',
-      type: 'stranger',
-      title: 'Анонімний співрозмовник',
-      status: 'очікування підключення',
-    });
+
+    setStrangerState('searching');
+    setStrangerSession(null);
     setMatchRequested(false);
+    setPartnerMatchRequested(false);
+    setStrangerEndReason(null);
     setMessages([]);
     setIsProfileOpen(false);
+
+    setActiveChat({
+      id: 'stranger-pending',
+      type: 'stranger',
+      title: 'Випадковий співрозмовник',
+      status: 'пошук співрозмовника...',
+    });
+
+    if (socketRef.current?.connected) {
+      socketRef.current.emit('stranger:search', (res) => {
+        if (!res?.ok) {
+          console.error('Помилка початку пошуку:', res?.error);
+        }
+      });
+    }
   };
 
+  // Скасування пошуку
+  const handleCancelSearch = () => {
+    if (socketRef.current?.connected) {
+      socketRef.current.emit('stranger:cancel');
+    }
+    setStrangerState('idle');
+    setStrangerSession(null);
+    setMatchRequested(false);
+    setPartnerMatchRequested(false);
+    setStrangerEndReason(null);
+    setActiveChat(null);
+  };
+
+  // Перехід до наступного співрозмовника («🎲 Інший»)
   const handleNextStranger = () => {
-    startStrangerSearch();
+    setStrangerState('searching');
+    setStrangerSession(null);
+    setMatchRequested(false);
+    setPartnerMatchRequested(false);
+    setStrangerEndReason(null);
+    setMessages([]);
+
+    setActiveChat({
+      id: 'stranger-pending',
+      type: 'stranger',
+      title: 'Випадковий співрозмовник',
+      status: 'пошук співрозмовника...',
+    });
+
+    if (socketRef.current?.connected) {
+      socketRef.current.emit('stranger:next', (res) => {
+        if (!res?.ok) {
+          console.error('Помилка переходу до наступного:', res?.error);
+        }
+      });
+    }
   };
 
+  // Запит або підтвердження додавання в контакти («🤝 Додати в контакти»)
   const handleRequestMatch = () => {
     if (matchRequested) return;
+    const sessionId = strangerSessionRef.current?.sessionId || activeChat?.id;
+    if (!sessionId) return;
+
     setMatchRequested(true);
     setMessages((prev) => [
       ...prev,
       {
-        id: `sys-${Date.now()}`,
+        id: `sys-req-${Date.now()}`,
         type: 'system',
-        body: 'Запит на контакт надіслано. Коли співрозмовник підтвердить — нікнейми відкриються.',
+        body: 'Запит на контакт надіслано. Коли співрозмовник підтвердить — ваші нікнейми відкриються!',
         createdAt: new Date().toISOString(),
       },
     ]);
+
+    if (socketRef.current?.connected) {
+      socketRef.current.emit('stranger:match-request', { sessionId }, (res) => {
+        if (!res?.ok) {
+          console.error('Помилка запиту на контакт:', res?.error);
+        }
+      });
+    }
+  };
+
+  // Завершення розмови зі сторони користувача
+  const handleLeaveStranger = () => {
+    if (socketRef.current?.connected) {
+      if (strangerStateRef.current === 'searching') {
+        socketRef.current.emit('stranger:cancel');
+      } else {
+        socketRef.current.emit('stranger:leave');
+      }
+    }
+    setStrangerState('idle');
+    setStrangerSession(null);
+    setMatchRequested(false);
+    setPartnerMatchRequested(false);
+    setStrangerEndReason(null);
+    setActiveChat(null);
   };
 
   const handleBackToList = () => {
     if (activeChat?.type === 'direct' && socketRef.current) {
       socketRef.current.emit('conversation:leave', { conversationId: activeChat.id });
+      setActiveChat(null);
+    } else if (activeChat?.type === 'stranger') {
+      handleLeaveStranger();
+    } else {
+      setActiveChat(null);
     }
-    setActiveChat(null);
   };
 
   // Фільтрація існуючих діалогів при пошуку
@@ -618,7 +895,7 @@ export default function Home() {
               </button>
               <div className="chat-target-avatar">
                 {activeChat.type === 'stranger'
-                  ? '🎲'
+                  ? (strangerSession?.partner?.anonAvatar || '🎲')
                   : (activeChat.otherUser?.username || '').slice(0, 2).toUpperCase()}
               </div>
               <div className="chat-target-meta">
@@ -626,21 +903,37 @@ export default function Home() {
                 <span className="chat-target-status">{activeChat.status}</span>
               </div>
               <div className="chat-header-actions">
-                {activeChat.type === 'stranger' && (
-                  <button
-                    className={`match-action-btn ${matchRequested ? 'is-pending' : ''}`}
-                    onClick={handleRequestMatch}
-                  >
-                    {matchRequested ? '⏳ Запит надіслано' : '🤝 Додати в контакти'}
-                  </button>
+                {activeChat.type === 'stranger' && strangerState === 'matched' && (
+                  <>
+                    <button
+                      className={`match-action-btn ${matchRequested ? 'is-pending' : ''} ${
+                        partnerMatchRequested ? 'is-invited' : ''
+                      }`}
+                      onClick={handleRequestMatch}
+                      title="Відкрити нікнейми та додати один одного в контакти"
+                    >
+                      {matchRequested
+                        ? '⏳ Запит надіслано'
+                        : partnerMatchRequested
+                          ? '🤝 Партнер чекає на вас!'
+                          : '🤝 Додати в контакти'}
+                    </button>
+                    <button
+                      className="next-stranger-btn"
+                      onClick={handleNextStranger}
+                      title="Перейти до наступного співрозмовника"
+                    >
+                      🎲 Інший
+                    </button>
+                  </>
                 )}
-                {activeChat.type === 'stranger' && (
+                {activeChat.type === 'stranger' && strangerState === 'ended' && (
                   <button
                     className="next-stranger-btn"
                     onClick={handleNextStranger}
-                    title="Наступний співрозмовник"
+                    title="Знайти нового співрозмовника"
                   >
-                    🎲 Інший
+                    🎲 Новий пошук
                   </button>
                 )}
                 <button
@@ -654,7 +947,7 @@ export default function Home() {
             </div>
 
             {/* Нагадування правил для випадкового чату */}
-            {activeChat.type === 'stranger' && (
+            {activeChat.type === 'stranger' && strangerState === 'matched' && (
               <div className="stranger-rule-bar">
                 <span>
                   🎭 Ви спілкуєтесь анонімно. Натисніть <strong>«Додати в контакти»</strong> — якщо співрозмовник зробить те саме, ваші нікнейми відкриються!
@@ -662,71 +955,121 @@ export default function Home() {
               </div>
             )}
 
-            {/* Область повідомлень */}
-            <div className="chat-messages-scroll">
-              {isLoadingMessages ? (
-                <div className="chat-empty-hint">
-                  <p>Завантаження повідомлень...</p>
+            {/* Контент екрану чату */}
+            {activeChat.type === 'stranger' && strangerState === 'searching' ? (
+              <div className="stranger-searching-pane">
+                <div className="searching-radar-wrap">
+                  <div className="radar-pulse-ring" />
+                  <div className="radar-pulse-ring delay-1" />
+                  <div className="radar-pulse-ring delay-2" />
+                  <div className="radar-center-icon">🎲</div>
                 </div>
-              ) : messages.length === 0 ? (
-                <div className="chat-empty-hint">
-                  <span className="chat-empty-icon">✍️</span>
-                  <p>Почніть розмову — надішліть перше повідомлення.</p>
-                </div>
-              ) : (
-                messages.map((msg) => {
-                  if (msg.type === 'system') {
-                    return (
-                      <div key={msg.id} className="system-bubble">
-                        <span>{msg.body}</span>
-                      </div>
-                    );
-                  }
-                  const isMe = msg.senderId === user.id;
-                  return (
-                    <div
-                      key={msg.id}
-                      className={`message-row ${isMe ? 'message-out' : 'message-in'}`}
-                    >
-                      <div className="message-bubble">
-                        <div className="message-text">{msg.body}</div>
-                        <div className="message-meta">
-                          <span className="message-time">
-                            {formatTimestamp(msg.createdAt)}
-                          </span>
-                          {isMe && <span className="message-ticks">✓</span>}
-                        </div>
-                      </div>
+                <h3>Шукаємо випадкового співрозмовника...</h3>
+                <p>
+                  Підбираємо пару серед активних користувачів. Ви спілкуватиметесь під анонімними образами українських тварин.
+                </p>
+                <button
+                  type="button"
+                  className="cancel-search-btn"
+                  onClick={handleCancelSearch}
+                >
+                  Скасувати пошук
+                </button>
+              </div>
+            ) : (
+              <>
+                {/* Область повідомлень */}
+                <div className="chat-messages-scroll">
+                  {isLoadingMessages ? (
+                    <div className="chat-empty-hint">
+                      <p>Завантаження повідомлень...</p>
                     </div>
-                  );
-                })
-              )}
-              <div ref={messagesEndRef} />
-            </div>
+                  ) : messages.length === 0 ? (
+                    <div className="chat-empty-hint">
+                      <span className="chat-empty-icon">✍️</span>
+                      <p>Почніть розмову — надішліть перше повідомлення.</p>
+                    </div>
+                  ) : (
+                    messages.map((msg) => {
+                      if (msg.type === 'system') {
+                        return (
+                          <div key={msg.id} className="system-bubble">
+                            <span>{msg.body}</span>
+                          </div>
+                        );
+                      }
+                      const isMe = msg.senderId === user.id;
+                      return (
+                        <div
+                          key={msg.id}
+                          className={`message-row ${isMe ? 'message-out' : 'message-in'}`}
+                        >
+                          <div className="message-bubble">
+                            {activeChat.type === 'stranger' && !isMe && msg.senderAnonName && (
+                              <div
+                                style={{
+                                  fontSize: '11.5px',
+                                  fontWeight: 600,
+                                  color: 'var(--accent)',
+                                  marginBottom: '3px',
+                                }}
+                              >
+                                {msg.senderAnonAvatar} {msg.senderAnonName}
+                              </div>
+                            )}
+                            <div className="message-text">{msg.body}</div>
+                            <div className="message-meta">
+                              <span className="message-time">
+                                {formatTimestamp(msg.createdAt)}
+                              </span>
+                              {isMe && <span className="message-ticks">✓</span>}
+                            </div>
+                          </div>
+                        </div>
+                      );
+                    })
+                  )}
+                  <div ref={messagesEndRef} />
+                </div>
 
-            {/* Рядок введення повідомлення */}
-            <form className="chat-input-bar" onSubmit={handleSendMessage}>
-              <button type="button" className="attach-btn" title="Прикріпити медіа">
-                📎
-              </button>
-              <input
-                type="text"
-                placeholder="Напишіть повідомлення..."
-                value={inputText}
-                onChange={(e) => setInputText(e.target.value)}
-                autoFocus
-              />
-              <button
-                type="submit"
-                className="send-btn"
-                disabled={!inputText.trim()}
-                title="Надіслати"
-              >
-                <svg viewBox="0 0 24 24" fill="currentColor" width="20" height="20">
-                  <path d="M2.01 21L23 12 2.01 3 2 10l15 2-15 2z" />
-                </svg>
-              </button>
-            </form>
+                {/* Нижня панель: поле вводу або панель завершеного чату */}
+                {activeChat.type === 'stranger' && strangerState === 'ended' ? (
+                  <div className="stranger-ended-panel">
+                    <span>Співрозмовник залишив чат або перейшов до іншого.</span>
+                    <button
+                      type="button"
+                      className="primary-pill-btn"
+                      onClick={handleNextStranger}
+                    >
+                      🎲 Знайти нового співрозмовника
+                    </button>
+                  </div>
+                ) : (
+                  <form className="chat-input-bar" onSubmit={handleSendMessage}>
+                    <button type="button" className="attach-btn" title="Прикріпити медіа">
+                      📎
+                    </button>
+                    <input
+                      type="text"
+                      placeholder="Напишіть повідомлення..."
+                      value={inputText}
+                      onChange={(e) => setInputText(e.target.value)}
+                      autoFocus
+                    />
+                    <button
+                      type="submit"
+                      className="send-btn"
+                      disabled={!inputText.trim()}
+                      title="Надіслати"
+                    >
+                      <svg viewBox="0 0 24 24" fill="currentColor" width="20" height="20">
+                        <path d="M2.01 21L23 12 2.01 3 2 10l15 2-15 2z" />
+                      </svg>
+                    </button>
+                  </form>
+                )}
+              </>
+            )}
           </div>
         ) : (
           /* Вітальний екран на десктопі */
