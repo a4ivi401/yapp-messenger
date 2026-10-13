@@ -6,6 +6,8 @@ import cookieParser from 'cookie-parser';
 import { Server } from 'socket.io';
 import { authRouter } from './routes/auth.js';
 import { conversationsRouter } from './routes/conversations.js';
+import { contactsRouter } from './routes/contacts.js';
+import { usersRouter } from './routes/users.js';
 import { attachUser } from './middleware/auth.js';
 import { pool } from './db.js';
 import { setupSocket } from './socket.js';
@@ -26,6 +28,8 @@ app.get('/health', async (_req, res) => {
 app.use(attachUser);
 app.use('/api/auth', authRouter);
 app.use('/api/conversations', conversationsRouter);
+app.use('/api/contacts', contactsRouter);
+app.use('/api/users', usersRouter);
 
 // У проді цей же сервер віддає зібраний фронтенд (client/dist)
 const clientDist = path.resolve(import.meta.dirname, '../../client/dist');

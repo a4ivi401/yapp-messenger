@@ -1,6 +1,6 @@
 import { z } from 'zod';
 import { findSessionUser, SESSION_COOKIE } from './middleware/auth.js';
-import { isParticipant, createMessage } from './conversations.js';
+import { isParticipant, createMessage, getConversationParticipantIds } from './conversations.js';
 
 function parseCookies(cookieHeader) {
   if (!cookieHeader) return {};
@@ -110,8 +110,15 @@ export function setupSocket(io) {
 
         const message = await createMessage(conversationId, socket.user.id, body);
 
-        // Транслюємо повідомлення всім у кімнаті діалогу
-        io.to(`conversation:${conversationId}`).emit('message:new', { message });
+        // Отримуємо всіх учасників для трансляції в кімнату діалогу та персональні кімнати
+        const participantIds = await getConversationParticipantIds(conversationId);
+        const targetRooms = [
+          `conversation:${conversationId}`,
+          ...participantIds.map((id) => `user:${id}`),
+        ];
+
+        // Socket.IO автоматично уникає дублювання подій для одного й того ж клієнта при вказанні масиву кімнат
+        io.to(targetRooms).emit('message:new', { message });
 
         ack?.({ ok: true, message });
       } catch (err) {

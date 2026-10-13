@@ -23,6 +23,8 @@ A messenger where you can chat with a random stranger, and if a **match** happen
 |---|---|
 | Auth: register / login / logout · `scrypt` + httpOnly cookie | ✅ done |
 | Real-time chat & messages (Socket.IO) | ✅ done |
+| Chats and contacts from DB + username search | ✅ done |
+| Browser & audio chime notifications (Web Audio & Notifications API) | ✅ done |
 | Random strangers & matching | 🎯 planned |
 | Media / voice messages / message statuses | 🎯 planned |
 
@@ -33,7 +35,7 @@ A messenger where you can chat with a random stranger, and if a **match** happen
 | # | Milestone | Days | Status |
 |---|---|---|---|
 | **M0** | Project skeleton + auth | 1 | ✅ done |
-| **M1** | Live chat — the messenger core | 2–4 | 🚧 in progress |
+| **M1** | Live chat — the messenger core | 2–4 | ✅ done |
 | **M2** | Random stranger + matching (**twist**) | 5–6 | 🎯 next |
 | **M3** | Statuses, media & extras | 7–11 | 🎯 planned |
 | **M4** | Deployment & defense prep | 12–14 | 🎯 planned |
@@ -47,7 +49,7 @@ Priority legend: 🟣 **core** (can't pass without it) · ⚪ **leftover** (only
 | **1** ✅ | Skeleton: Docker Compose, auth (`scrypt` + httpOnly), migrations, Telegram-style UI shell + random-chat stub | 🟣 |
 | **2** ✅ | `conversations` + `messages` model (migration 002), REST API for chats and messages | 🟣 |
 | **3** ✅ | Realtime via Socket.IO: socket auth by session, rooms, `message:new` event, persistence to DB | 🟣 |
-| **4** | Chats and contacts from the DB: `contacts` model, a real list instead of the stub (preview, time, sorting) | 🟣 |
+| **4** ✅ | Chats and contacts from the DB: `contacts` model (migration 003), username search, audio chime & system notifications | 🟣 |
 | **5** | Random stranger: in-memory matchmaking queue (`stranger:search` → `stranger:matched`), ephemeral chat, anonymous handle + emoji avatar | 🟣 |
 | **6** | Matching: `matches` table, mutual `match:request` → upgrade the chat to a contact and reveal usernames; "next stranger" closes the ephemeral chat | 🟣 |
 | **7** | "Delivered / read" statuses + "typing…" indicator over the socket | 🟣 minimum |
@@ -136,13 +138,19 @@ Open **http://localhost:5173**. (Kill the docker stack first if ports are taken:
 | GET | `/api/conversations` | user's conversations (with participant and last message preview) |
 | POST | `/api/conversations` | `{ username }` — find or create direct conversation |
 | GET | `/api/conversations/:id` | conversation details (participant only) |
-| GET | `/api/conversations/:id/messages` | message history; pagination `?limit=50&before=<id>` |
+| GET | `/api/conversations/:id/messages` | message history (includes `senderUsername`); pagination `?limit=50&before=<id>` |
 | POST | `/api/conversations/:id/messages` | `{ body }` — send a message |
+| GET | `/api/contacts` | list of saved contacts and total count `{ contacts, count }` |
+| POST | `/api/contacts` | `{ username }` or `{ userId }` — add user to contacts (idempotent, self-contact validation) |
+| DELETE | `/api/contacts/:userId` | remove user from contacts by UUID |
+| GET | `/api/users/search?q=...` | global user search by username substring with `isContact` flag |
 
 ### Socket.IO (Realtime)
 
 Connection: `ws://<host>/socket.io` (or `http://<host>/socket.io` for polling).  
 Authentication: automatic via httpOnly `sid` cookie (handshake). Unauthenticated connections are rejected (`Error: Не авторизовано`).
+
+Upon connection, each authenticated user automatically joins their own private room `user:<userId>`, allowing background event delivery and notifications even for inactive chats.
 
 #### Client Events (Client → Server)
 
@@ -150,13 +158,13 @@ Authentication: automatic via httpOnly `sid` cookie (handshake). Unauthenticated
 |---|---|---|---|
 | `conversation:join` | `{ conversationId }` | `{ ok: true }` or `{ ok: false, error }` | Join room `conversation:<id>` (participants only) |
 | `conversation:leave` | `{ conversationId }` | `{ ok: true }` | Leave conversation room |
-| `message:send` | `{ conversationId, body }` | `{ ok: true, message }` or `{ ok: false, error }` | Persist message to DB and broadcast to room |
+| `message:send` | `{ conversationId, body }` | `{ ok: true, message }` or `{ ok: false, error }` | Persist message to DB and broadcast to conversation room & participant private rooms |
 
 #### Server Events (Server → Client)
 
 | Event | Payload | Description |
 |---|---|---|
-| `message:new` | `{ message }` | New message in the conversation room (emitted to all room participants) |
+| `message:new` | `{ message }` | New message with enriched attributes (including `senderUsername`). Emitted to `conversation:<id>` and recipients' private rooms `user:<userId>` for sidebar refresh, audio chimes, and browser notifications |
 
 ## Structure
 

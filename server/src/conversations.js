@@ -79,6 +79,17 @@ export async function findOrCreateDirectConversation(userAId, userBId) {
   }
 }
 
+/**
+ * Отримує id усіх учасників діалогу.
+ */
+export async function getConversationParticipantIds(conversationId) {
+  const { rows } = await query(
+    `SELECT user_id FROM conversation_participants WHERE conversation_id = $1`,
+    [conversationId],
+  );
+  return rows.map((r) => r.user_id);
+}
+
 function formatConversationRow(row) {
   return {
     id: row.id,
@@ -178,6 +189,7 @@ function formatMessageRow(row) {
     id: row.id,
     conversationId: row.conversation_id,
     senderId: row.sender_id,
+    senderUsername: row.sender_username ?? null,
     body: row.body,
     createdAt: row.created_at,
   };
@@ -205,21 +217,23 @@ export async function listMessages(conversationId, { limit = 50, before = null }
     const cursorCreatedAt = cursorRows[0].created_at;
 
     const res = await query(
-      `SELECT id, conversation_id, sender_id, body, created_at
-         FROM messages
-        WHERE conversation_id = $1
-          AND (created_at, id) < ($2, $3)
-        ORDER BY created_at DESC, id DESC
+      `SELECT m.id, m.conversation_id, m.sender_id, m.body, m.created_at, u.username AS sender_username
+         FROM messages m
+         JOIN users u ON u.id = m.sender_id
+        WHERE m.conversation_id = $1
+          AND (m.created_at, m.id) < ($2, $3)
+        ORDER BY m.created_at DESC, m.id DESC
         LIMIT $4`,
       [conversationId, cursorCreatedAt, before, limit + 1],
     );
     rows = res.rows;
   } else {
     const res = await query(
-      `SELECT id, conversation_id, sender_id, body, created_at
-         FROM messages
-        WHERE conversation_id = $1
-        ORDER BY created_at DESC, id DESC
+      `SELECT m.id, m.conversation_id, m.sender_id, m.body, m.created_at, u.username AS sender_username
+         FROM messages m
+         JOIN users u ON u.id = m.sender_id
+        WHERE m.conversation_id = $1
+        ORDER BY m.created_at DESC, m.id DESC
         LIMIT $2`,
       [conversationId, limit + 1],
     );
@@ -243,9 +257,14 @@ export async function listMessages(conversationId, { limit = 50, before = null }
  */
 export async function createMessage(conversationId, senderId, body) {
   const { rows } = await query(
-    `INSERT INTO messages (conversation_id, sender_id, body)
-     VALUES ($1, $2, $3)
-     RETURNING id, conversation_id, sender_id, body, created_at`,
+    `WITH inserted AS (
+       INSERT INTO messages (conversation_id, sender_id, body)
+       VALUES ($1, $2, $3)
+       RETURNING id, conversation_id, sender_id, body, created_at
+     )
+     SELECT ins.id, ins.conversation_id, ins.sender_id, ins.body, ins.created_at, u.username AS sender_username
+       FROM inserted ins
+       JOIN users u ON u.id = ins.sender_id`,
     [conversationId, senderId, body],
   );
   return formatMessageRow(rows[0]);

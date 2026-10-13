@@ -9,6 +9,7 @@ import {
   listConversationsForUser,
   listMessages,
   createMessage,
+  getConversationParticipantIds,
 } from '../conversations.js';
 
 // Express 4 не передає помилки з async-обробників у error-middleware (а глобального тут і немає),
@@ -58,8 +59,9 @@ conversationsRouter.post(
     }
 
     const me = req.user.user_id;
+    const targetUsername = parsed.data.username.replace(/^@+/, '');
     const { rows } = await query('SELECT id FROM users WHERE username = $1', [
-      parsed.data.username,
+      targetUsername,
     ]);
     const target = rows[0];
     if (!target) {
@@ -139,7 +141,12 @@ conversationsRouter.post(
 
     const io = req.app.get('io');
     if (io) {
-      io.to(`conversation:${req.params.id}`).emit('message:new', { message });
+      const participantIds = await getConversationParticipantIds(req.params.id);
+      const targetRooms = [
+        `conversation:${req.params.id}`,
+        ...participantIds.map((id) => `user:${id}`),
+      ];
+      io.to(targetRooms).emit('message:new', { message });
     }
 
     res.status(201).json({ message });

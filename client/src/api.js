@@ -16,7 +16,7 @@ export const api = {
   logout: () => request('/api/auth/logout', { method: 'POST' }),
   me: () => request('/api/auth/me'),
 
-  // Діалоги та повідомлення (REST; realtime під'єднаємо в Day 3)
+  // Діалоги та повідомлення
   listConversations: () => request('/api/conversations'),
   createConversation: (username) =>
     request('/api/conversations', { method: 'POST', body: JSON.stringify({ username }) }),
@@ -33,4 +33,14 @@ export const api = {
       method: 'POST',
       body: JSON.stringify({ body }),
     }),
+
+  // Користувачі та пошук
+  searchUsers: (q) => request(`/api/users/search?q=${encodeURIComponent(q)}`),
+
+  // Контакти
+  listContacts: () => request('/api/contacts'),
+  addContact: (data) =>
+    request('/api/contacts', { method: 'POST', body: JSON.stringify(data) }),
+  removeContact: (userId) =>
+    request(`/api/contacts/${userId}`, { method: 'DELETE' }),
 };
