@@ -30,6 +30,7 @@ export default function Home() {
   // Список реальних діалогів
   const [conversations, setConversations] = useState([]);
   const [contactsCount, setContactsCount] = useState(0);
+  const [matchesCount, setMatchesCount] = useState(0);
 
   // Активний чат: null | { id, type: 'direct' | 'stranger', title, otherUser, status }
   const [activeChat, setActiveChat] = useState(null);
@@ -73,15 +74,16 @@ export default function Home() {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [messages]);
 
-  // Завантаження діалогів та кількості контактів при першому вході
+  // Завантаження діалогів та статистики профілю при першому вході
   const loadInitialData = useCallback(async () => {
     try {
-      const [convsRes, contactsRes] = await Promise.all([
+      const [convsRes, statsRes] = await Promise.all([
         api.listConversations(),
-        api.listContacts().catch(() => ({ count: 0 })),
+        api.matchStats().catch(() => ({ matchesCount: 0, contactsCount: 0 })),
       ]);
       setConversations(convsRes.conversations || []);
-      setContactsCount(contactsRes.count || 0);
+      setContactsCount(statsRes.contactsCount || 0);
+      setMatchesCount(statsRes.matchesCount || 0);
     } catch (err) {
       console.error('Помилка завантаження даних:', err);
     }
@@ -122,7 +124,8 @@ export default function Home() {
       type: 'direct',
       title: `@${conv.otherUser.username}`,
       otherUser: conv.otherUser,
-      status: 'в мережі',
+      status: conv.isMatch ? 'знайомство з випадкового чату' : 'в мережі',
+      isMatch: Boolean(conv.isMatch),
     });
 
     setIsLoadingMessages(true);
@@ -339,7 +342,8 @@ export default function Home() {
         type: 'direct',
         title: `@${partner.username}`,
         otherUser: partner,
-        status: 'в контактах',
+        status: 'знайомство з випадкового чату',
+        isMatch: true,
       });
 
       // Приєднуємо сокет до постійної кімнати діалогу
@@ -404,6 +408,11 @@ export default function Home() {
     socket.on('contact:new', () => {
       setContactsCount((prev) => prev + 1);
       loadInitialData();
+    });
+
+    // Сповіщення про новий метч — оновлюємо лічильник у профілі
+    socket.on('match:new', () => {
+      setMatchesCount((prev) => prev + 1);
     });
 
     return () => {
@@ -744,9 +753,16 @@ export default function Home() {
                         <div className="chat-row-avatar">{initials}</div>
                         <div className="chat-row-body">
                           <div className="chat-row-line1">
-                            <span className="chat-row-name">
-                              @{conv.otherUser?.username}
-                            </span>
+                            <div className="chat-row-title-wrap">
+                              <span className="chat-row-name">
+                                @{conv.otherUser?.username}
+                              </span>
+                              {conv.isMatch && (
+                                <span className="match-badge" title="Знайдено у випадковому чаті">
+                                  🎲 Метч
+                                </span>
+                              )}
+                            </div>
                             <span className="chat-row-time">
                               {formatTimestamp(
                                 conv.lastMessage?.createdAt || conv.createdAt,
@@ -846,9 +862,16 @@ export default function Home() {
                       <div className="chat-row-avatar">{initials}</div>
                       <div className="chat-row-body">
                         <div className="chat-row-line1">
-                          <span className="chat-row-name">
-                            @{conv.otherUser.username}
-                          </span>
+                          <div className="chat-row-title-wrap">
+                            <span className="chat-row-name">
+                              @{conv.otherUser.username}
+                            </span>
+                            {conv.isMatch && (
+                              <span className="match-badge" title="Знайдено у випадковому чаті">
+                                🎲 Метч
+                              </span>
+                            )}
+                          </div>
                           <span className="chat-row-time">
                             {formatTimestamp(
                               conv.lastMessage?.createdAt || conv.createdAt,
@@ -899,7 +922,14 @@ export default function Home() {
                   : (activeChat.otherUser?.username || '').slice(0, 2).toUpperCase()}
               </div>
               <div className="chat-target-meta">
-                <h2>{activeChat.title}</h2>
+                <h2>
+                  <span className="chat-target-name">{activeChat.title}</span>
+                  {activeChat.isMatch && (
+                    <span className="match-badge" title="Знайдено у випадковому чаті">
+                      🎲 Метч
+                    </span>
+                  )}
+                </h2>
                 <span className="chat-target-status">{activeChat.status}</span>
               </div>
               <div className="chat-header-actions">
@@ -1113,7 +1143,7 @@ export default function Home() {
                   <span>контактів</span>
                 </div>
                 <div className="stat-box">
-                  <strong>0</strong>
+                  <strong>{matchesCount}</strong>
                   <span>метчів</span>
                 </div>
               </div>

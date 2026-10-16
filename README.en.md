@@ -36,7 +36,7 @@ A messenger where you can chat with a random stranger, and if a **match** happen
 |---|---|---|---|
 | **M0** | Project skeleton + auth | 1 | ✅ done |
 | **M1** | Live chat — the messenger core | 2–4 | ✅ done |
-| **M2** | Random stranger + matching (**twist**) | 5–6 | ✅ done (Day 5) |
+| **M2** | Random stranger + matching (**twist**) | 5–6 | ✅ done |
 | **M3** | Statuses, media & extras | 7–11 | 🎯 next |
 | **M4** | Deployment & defense prep | 12–14 | 🎯 planned |
 
@@ -51,7 +51,7 @@ Priority legend: 🟣 **core** (can't pass without it) · ⚪ **leftover** (only
 | **3** ✅ | Realtime via Socket.IO: socket auth by session, rooms, `message:new` event, persistence to DB | 🟣 |
 | **4** ✅ | Chats and contacts from the DB: `contacts` model (migration 003), username search, audio chime & system notifications | 🟣 |
 | **5** ✅ | Random stranger: in-memory matchmaking queue (FIFO), session exclusion prevention, anonymous personas, ephemeral chat & mutual match to contacts | 🟣 |
-| **6** | Matching enhancements: matchmaking filters, metrics and transition polish | 🟣 |
+| **6** ✅ | Matching: `matches` model (migration 004), canonical UUID pair ordering, mutual match persistence in DB, stats API, realtime `match:new`, visual "🎲 Метч" badges | 🟣 |
 | **7** | "Delivered / read" statuses + "typing…" indicator over the socket | 🟣 minimum |
 | **8** | Media: photos & files (`multer`, `uploads` volume), image previews | ⚪ |
 | **9** | Voice messages (MediaRecorder: record → upload → playback) | ⚪ |
@@ -143,6 +143,8 @@ Open **http://localhost:5173**. (Kill the docker stack first if ports are taken:
 | GET | `/api/contacts` | list of saved contacts and total count `{ contacts, count }` |
 | POST | `/api/contacts` | `{ username }` or `{ userId }` — add user to contacts (idempotent, self-contact validation) |
 | DELETE | `/api/contacts/:userId` | remove user from contacts by UUID |
+| GET | `/api/matches` | user's mutual match history `{ matches }` |
+| GET | `/api/matches/stats` | aggregated user stats `{ matchesCount, contactsCount }` |
 | GET | `/api/users/search?q=...` | global user search by username substring with `isContact` flag |
 
 ### Socket.IO (Realtime)
@@ -177,6 +179,7 @@ Upon connection, each authenticated user automatically joins their own private r
 | `stranger:revealed` | `{ sessionId, conversationId, conversation, partner }` | Mutual match! Real usernames revealed, chat converted to permanent contact |
 | `stranger:left` | `{ sessionId, reason }` | Partner left or skipped to another stranger (`reason: 'next' \| 'left' \| 'disconnected'`) |
 | `contact:new` | `{ contact }` | New contact added to user's list after mutual match |
+| `match:new` | `{ match }` | Realtime notification of newly recorded match to sync counters immediately |
 
 ## Structure
 

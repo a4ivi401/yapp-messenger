@@ -9,6 +9,7 @@ import {
   getConversationForUser,
 } from './conversations.js';
 import { addContact } from './contacts.js';
+import { recordMatch } from './matches.js';
 import {
   findOrEnqueue,
   cancelSearch,
@@ -352,14 +353,18 @@ export function setupSocket(io) {
           }
         }
 
-        // 4. Отримуємо актуальні об'єкти діалогу для кожного користувача
+        // 4. Фіксуємо метч в історії (ідемпотентно: повторний метч тієї ж пари не дублюється)
+        const { match } = await recordMatch(user1.id, user2.id, conversationId);
+
+        // 5. Отримуємо актуальні об'єкти діалогу для кожного користувача
         const convForUser1 = await getConversationForUser(conversationId, user1.id);
         const convForUser2 = await getConversationForUser(conversationId, user2.id);
 
-        // 5. Сповіщаємо обох про розкриття особистостей
+        // 6. Сповіщаємо обох про розкриття особистостей
         io.to(`user:${user1.id}`).emit('stranger:revealed', {
           sessionId,
           conversationId,
+          matchId: match.id,
           conversation: convForUser1,
           partner: {
             id: user2.id,
@@ -370,6 +375,7 @@ export function setupSocket(io) {
         io.to(`user:${user2.id}`).emit('stranger:revealed', {
           sessionId,
           conversationId,
+          matchId: match.id,
           conversation: convForUser2,
           partner: {
             id: user1.id,
@@ -385,7 +391,25 @@ export function setupSocket(io) {
           contact: { id: user1.id, username: user1.username, addedAt: new Date().toISOString() },
         });
 
-        ack?.({ ok: true, mutual: true, conversationId });
+        // І про новий метч — клієнт оновлює лічильник у профілі без перезавантаження
+        io.to(`user:${user1.id}`).emit('match:new', {
+          match: {
+            id: match.id,
+            conversationId,
+            createdAt: match.createdAt,
+            partner: { id: user2.id, username: user2.username },
+          },
+        });
+        io.to(`user:${user2.id}`).emit('match:new', {
+          match: {
+            id: match.id,
+            conversationId,
+            createdAt: match.createdAt,
+            partner: { id: user1.id, username: user1.username },
+          },
+        });
+
+        ack?.({ ok: true, mutual: true, conversationId, matchId: match.id });
       } catch (err) {
         console.error('stranger:match-request error:', err);
         ack?.({ ok: false, error: 'Помилка обробки запиту контакту' });

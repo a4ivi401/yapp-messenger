@@ -95,6 +95,8 @@ function formatConversationRow(row) {
     id: row.id,
     type: row.type,
     createdAt: row.created_at,
+    isMatch: Boolean(row.match_id),
+    matchedAt: row.matched_at || null,
     otherUser: {
       id: row.other_user_id,
       username: row.other_username,
@@ -120,6 +122,8 @@ export async function getConversationForUser(conversationId, userId) {
        c.id,
        c.type,
        c.created_at,
+       m.id             AS match_id,
+       m.created_at     AS matched_at,
        other_u.id       AS other_user_id,
        other_u.username AS other_username,
        lm.id            AS last_message_id,
@@ -133,11 +137,13 @@ export async function getConversationForUser(conversationId, userId) {
        ON other_p.conversation_id = c.id AND other_p.user_id <> $2
      JOIN users other_u
        ON other_u.id = other_p.user_id
+     LEFT JOIN matches m
+       ON m.conversation_id = c.id
      LEFT JOIN LATERAL (
-       SELECT m.id, m.body, m.sender_id, m.created_at
-         FROM messages m
-        WHERE m.conversation_id = c.id
-        ORDER BY m.created_at DESC, m.id DESC
+       SELECT msg.id, msg.body, msg.sender_id, msg.created_at
+         FROM messages msg
+        WHERE msg.conversation_id = c.id
+        ORDER BY msg.created_at DESC, msg.id DESC
         LIMIT 1
      ) lm ON true
     WHERE c.id = $1`,
@@ -157,6 +163,8 @@ export async function listConversationsForUser(userId) {
        c.id,
        c.type,
        c.created_at,
+       m.id             AS match_id,
+       m.created_at     AS matched_at,
        other_u.id       AS other_user_id,
        other_u.username AS other_username,
        lm.id            AS last_message_id,
@@ -170,11 +178,13 @@ export async function listConversationsForUser(userId) {
        ON other_p.conversation_id = c.id AND other_p.user_id <> $1
      JOIN users other_u
        ON other_u.id = other_p.user_id
+     LEFT JOIN matches m
+       ON m.conversation_id = c.id
      LEFT JOIN LATERAL (
-       SELECT m.id, m.body, m.sender_id, m.created_at
-         FROM messages m
-        WHERE m.conversation_id = c.id
-        ORDER BY m.created_at DESC, m.id DESC
+       SELECT msg.id, msg.body, msg.sender_id, msg.created_at
+         FROM messages msg
+        WHERE msg.conversation_id = c.id
+        ORDER BY msg.created_at DESC, msg.id DESC
         LIMIT 1
      ) lm ON true
     ORDER BY COALESCE(lm.created_at, c.created_at) DESC`,

@@ -7,6 +7,7 @@ import { Server } from 'socket.io';
 import { authRouter } from './routes/auth.js';
 import { conversationsRouter } from './routes/conversations.js';
 import { contactsRouter } from './routes/contacts.js';
+import { matchesRouter } from './routes/matches.js';
 import { usersRouter } from './routes/users.js';
 import { attachUser } from './middleware/auth.js';
 import { pool } from './db.js';
@@ -29,6 +30,7 @@ app.use(attachUser);
 app.use('/api/auth', authRouter);
 app.use('/api/conversations', conversationsRouter);
 app.use('/api/contacts', contactsRouter);
+app.use('/api/matches', matchesRouter);
 app.use('/api/users', usersRouter);
 
 // У проді цей же сервер віддає зібраний фронтенд (client/dist)

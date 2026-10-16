@@ -43,4 +43,11 @@ export const api = {
     request('/api/contacts', { method: 'POST', body: JSON.stringify(data) }),
   removeContact: (userId) =>
     request(`/api/contacts/${userId}`, { method: 'DELETE' }),
+
+  // Метчі (взаємні знайомства у випадковому чаті)
+  listMatches: ({ limit } = {}) => {
+    const qs = limit != null ? `?limit=${limit}` : '';
+    return request(`/api/matches${qs}`);
+  },
+  matchStats: () => request('/api/matches/stats'),
 };
