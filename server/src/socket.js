@@ -17,6 +17,7 @@ import {
   requestContactMatch,
   saveStrangerMessage,
   getSession,
+  getSessionByUserId,
   handleDisconnect,
 } from './stranger.js';
 
@@ -82,6 +83,12 @@ export function setupSocket(io) {
   io.on('connection', (socket) => {
     // Персональна кімната користувача (для майбутніх системних сповіщень та метчингу)
     socket.join(`user:${socket.user.id}`);
+
+    // Якщо у користувача вже є активна анонімна сесія — приєднуємо сокет до кімнати сесії
+    const activeStranger = getSessionByUserId(socket.user.id);
+    if (activeStranger) {
+      socket.join(`stranger:${activeStranger.id}`);
+    }
 
     // Приєднання до кімнати діалогу
     socket.on('conversation:join', async (data, ack) => {
@@ -160,6 +167,12 @@ export function setupSocket(io) {
 
     // Допоміжна функція для оповіщення пари про метч
     function notifyMatch(session) {
+      // Приєднуємо всі відкриті сокети користувачів до кімнати сесії
+      if (io.in) {
+        io.in(`user:${session.user1.id}`).socketsJoin(`stranger:${session.id}`);
+        io.in(`user:${session.user2.id}`).socketsJoin(`stranger:${session.id}`);
+      }
+
       const socket1 = io.sockets.sockets.get(session.user1.socketId);
       const socket2 = io.sockets.sockets.get(session.user2.socketId);
 
@@ -255,7 +268,10 @@ export function setupSocket(io) {
         };
 
         saveStrangerMessage(sessionId, message);
-        io.to(`stranger:${sessionId}`).emit('stranger:message', { message });
+        io.to(`stranger:${sessionId}`)
+          .to(`user:${session.user1.id}`)
+          .to(`user:${session.user2.id}`)
+          .emit('stranger:message', { message });
 
         ack?.({ ok: true, message });
       } catch (err) {
@@ -418,6 +434,13 @@ export function setupSocket(io) {
 
     // Розрив з'єднання сокета
     socket.on('disconnect', () => {
+      // Якщо у користувача ще є інші активні підключення (інші вкладки або оновлення транспорту),
+      // не скидаємо його сесію передчасно
+      const remainingSockets = io.sockets.adapter?.rooms?.get(`user:${socket.user.id}`);
+      if (remainingSockets && remainingSockets.size > 0) {
+        return;
+      }
+
       const left = handleDisconnect(socket.user.id, socket.id);
       if (left && left.partner) {
         io.to(`user:${left.partner.id}`).emit('stranger:left', {

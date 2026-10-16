@@ -281,7 +281,9 @@ export default function Home() {
 
       if (
         currentChat?.type === 'stranger' &&
-        (currentChat.id === message.sessionId || currentStranger?.sessionId === message.sessionId)
+        (currentChat.id === message.sessionId ||
+          currentStranger?.sessionId === message.sessionId ||
+          currentChat.id === 'stranger-pending')
       ) {
         setMessages((prev) => {
           if (prev.some((m) => m.id === message.id)) return prev;
@@ -507,6 +509,11 @@ export default function Home() {
           (res) => {
             if (!res?.ok) {
               console.error('Помилка відправки повідомлення незнайомцю:', res?.error);
+            } else if (res?.message) {
+              setMessages((prev) => {
+                if (prev.some((m) => m.id === res.message.id)) return prev;
+                return [...prev, res.message];
+              });
             }
           },
         );

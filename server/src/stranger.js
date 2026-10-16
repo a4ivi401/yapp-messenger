@@ -277,12 +277,20 @@ export function findOrEnqueue(user, socketId, io = null) {
 
     // 3. Перевірка на «мертвий» сокет, якщо передано Socket.IO
     if (io) {
-      const candidateSocket = io.sockets.sockets.get(candidate.socketId);
+      let candidateSocket = io.sockets.sockets.get(candidate.socketId);
       if (!candidateSocket || !candidateSocket.connected) {
-        // Видаляємо мертвий запис і продовжуємо перевірку наступного
-        waitingQueue.splice(i, 1);
-        i--;
-        continue;
+        // Перевіряємо, чи користувач має активний підключений сокет у персональній кімнаті user:<userId>
+        const userRoom = io.sockets.adapter?.rooms?.get(`user:${candidate.userId}`);
+        const activeSocketId = userRoom ? Array.from(userRoom)[0] : null;
+        if (activeSocketId && io.sockets.sockets.get(activeSocketId)?.connected) {
+          candidate.socketId = activeSocketId;
+          candidateSocket = io.sockets.sockets.get(activeSocketId);
+        } else {
+          // Видаляємо мертвий запис і продовжуємо перевірку наступного
+          waitingQueue.splice(i, 1);
+          i--;
+          continue;
+        }
       }
     }
 
@@ -359,13 +367,13 @@ export function findOrEnqueue(user, socketId, io = null) {
  */
 export function handleDisconnect(userId, socketId) {
   // Якщо сокет чекав у черзі — видаляємо
-  const qIndex = waitingQueue.findIndex((entry) => entry.socketId === socketId);
+  const qIndex = waitingQueue.findIndex((entry) => entry.socketId === socketId || entry.userId === userId);
   if (qIndex !== -1) {
     waitingQueue.splice(qIndex, 1);
   }
 
-  // Якщо сокет був у активній сесії саме на цьому socketId — завершуємо сесію
-  const sessionId = socketSessionIndex.get(socketId);
+  // Якщо сокет був у активній сесії — завершуємо сесію
+  const sessionId = socketSessionIndex.get(socketId) || userSessionIndex.get(userId);
   if (sessionId) {
     return leaveSession(userId, 'disconnected');
   }
