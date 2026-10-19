@@ -1,4 +1,5 @@
 import { pool, query } from './db.js';
+import { isOnline } from './presence.js';
 
 /**
  * Перевіряє, чи є користувач учасником діалогу.
@@ -100,6 +101,13 @@ function formatConversationRow(row) {
     otherUser: {
       id: row.other_user_id,
       username: row.other_username,
+      // Онлайн-стан береться з пам'яті процесу (живі сокети), а не з БД —
+      // тому він завжди актуальний на момент відповіді
+      isOnline: isOnline(row.other_user_id),
+      lastSeenAt: row.other_last_seen_at || null,
+      // Watermark-и співрозмовника: за ними клієнт виводить статус власних повідомлень
+      lastDeliveredAt: row.other_last_delivered_at || null,
+      lastReadAt: row.other_last_read_at || null,
     },
     lastMessage: row.last_message_id
       ? {
@@ -126,6 +134,9 @@ export async function getConversationForUser(conversationId, userId) {
        m.created_at     AS matched_at,
        other_u.id       AS other_user_id,
        other_u.username AS other_username,
+       other_u.last_seen_at AS other_last_seen_at,
+       other_p.last_delivered_at AS other_last_delivered_at,
+       other_p.last_read_at      AS other_last_read_at,
        lm.id            AS last_message_id,
        lm.body          AS last_message_body,
        lm.sender_id     AS last_message_sender_id,
@@ -167,6 +178,9 @@ export async function listConversationsForUser(userId) {
        m.created_at     AS matched_at,
        other_u.id       AS other_user_id,
        other_u.username AS other_username,
+       other_u.last_seen_at AS other_last_seen_at,
+       other_p.last_delivered_at AS other_last_delivered_at,
+       other_p.last_read_at      AS other_last_read_at,
        lm.id            AS last_message_id,
        lm.body          AS last_message_body,
        lm.sender_id     AS last_message_sender_id,
@@ -278,4 +292,71 @@ export async function createMessage(conversationId, senderId, body) {
     [conversationId, senderId, body],
   );
   return formatMessageRow(rows[0]);
+}
+
+/**
+ * Позначає всі вхідні повідомлення діалогу прочитаними для конкретного учасника.
+ *
+ * Watermark піднімається до часу найновішого чужого повідомлення, тому:
+ * - значення монотонне (умова `latest.ts > last_read_at` не дає відкотити його назад);
+ * - «прочитано» завжди тягне за собою «доставлено» — окремого стану не існує;
+ * - якщо нових вхідних немає, UPDATE не виконується взагалі (0 рядків), тож
+ *   клієнт може кликати подію скільки завгодно без write amplification.
+ *
+ * Повертає { lastReadAt, lastDeliveredAt } або null, якщо змін не було
+ * (немає нових вхідних або користувач не є учасником діалогу).
+ */
+export async function markConversationRead(conversationId, userId) {
+  const { rows } = await query(
+    `WITH latest AS (
+       SELECT max(m.created_at) AS ts
+         FROM messages m
+        WHERE m.conversation_id = $1 AND m.sender_id <> $2
+     )
+     UPDATE conversation_participants p
+        SET last_read_at      = latest.ts,
+            last_delivered_at = GREATEST(COALESCE(p.last_delivered_at, latest.ts), latest.ts)
+       FROM latest
+      WHERE p.conversation_id = $1
+        AND p.user_id = $2
+        AND latest.ts IS NOT NULL
+        AND latest.ts > COALESCE(p.last_read_at, '-infinity'::timestamptz)
+     RETURNING p.last_read_at, p.last_delivered_at`,
+    [conversationId, userId],
+  );
+
+  if (rows.length === 0) return null;
+  return {
+    lastReadAt: rows[0].last_read_at,
+    lastDeliveredAt: rows[0].last_delivered_at,
+  };
+}
+
+/**
+ * Позначає одне повідомлення доставленим його одержувачу (watermark last_delivered_at).
+ * Власні повідомлення та вже покриті watermark'ом ігноруються.
+ *
+ * Повертає { conversationId, senderId, lastDeliveredAt } або null, якщо
+ * оновлювати нічого (повідомлення не існує, воно своє, або вже доставлене).
+ */
+export async function markMessageDelivered(messageId, userId) {
+  const { rows } = await query(
+    `UPDATE conversation_participants p
+        SET last_delivered_at = m.created_at
+       FROM messages m
+      WHERE m.id = $1
+        AND m.conversation_id = p.conversation_id
+        AND p.user_id = $2
+        AND m.sender_id <> $2
+        AND m.created_at > COALESCE(p.last_delivered_at, '-infinity'::timestamptz)
+     RETURNING p.conversation_id, p.last_delivered_at, m.sender_id`,
+    [messageId, userId],
+  );
+
+  if (rows.length === 0) return null;
+  return {
+    conversationId: rows[0].conversation_id,
+    senderId: rows[0].sender_id,
+    lastDeliveredAt: rows[0].last_delivered_at,
+  };
 }

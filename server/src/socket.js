@@ -7,9 +7,18 @@ import {
   getConversationParticipantIds,
   findOrCreateDirectConversation,
   getConversationForUser,
+  markConversationRead,
+  markMessageDelivered,
 } from './conversations.js';
 import { addContact } from './contacts.js';
 import { recordMatch } from './matches.js';
+import {
+  addSocket,
+  removeSocket,
+  isOnline,
+  touchLastSeen,
+  broadcastPresence,
+} from './presence.js';
 import {
   findOrEnqueue,
   cancelSearch,
@@ -50,6 +59,24 @@ const strangerSessionSchema = z.object({
   sessionId: z.string().uuid(),
 });
 
+const deliveredSchema = z.object({
+  messageId: z.string().uuid(),
+});
+
+const typingSchema = z.object({
+  conversationId: z.string().uuid(),
+  isTyping: z.boolean(),
+});
+
+const strangerTypingSchema = z.object({
+  sessionId: z.string().uuid(),
+  isTyping: z.boolean(),
+});
+
+// Не частіше одного typing-сигналу на адресата за 500 мс: клієнт уже тротлить,
+// це другий рубіж проти багатого/зламаного клієнта.
+const TYPING_THROTTLE_MS = 500;
+
 /**
  * Налаштовує Socket.IO сервер: авторизація, кімнати діалогів та realtime-повідомлення.
  */
@@ -84,10 +111,49 @@ export function setupSocket(io) {
     // Персональна кімната користувача (для майбутніх системних сповіщень та метчингу)
     socket.join(`user:${socket.user.id}`);
 
+    // Присутність: користувач онлайн, поки в нього є хоч один живий сокет.
+    // Повідомляємо лише при переході офлайн → онлайн, інакше кожна нова
+    // вкладка спамила б співрозмовників однаковою подією.
+    const { becameOnline } = addSocket(socket.user.id, socket.id);
+    if (becameOnline) {
+      // Предикат відсікає випадок, коли користувач уже встиг відключитися,
+      // поки готувалася розсилка
+      broadcastPresence(
+        io,
+        socket.user.id,
+        { isOnline: true, lastSeenAt: null },
+        () => isOnline(socket.user.id),
+      );
+    }
+
     // Якщо у користувача вже є активна анонімна сесія — приєднуємо сокет до кімнати сесії
     const activeStranger = getSessionByUserId(socket.user.id);
     if (activeStranger) {
       socket.join(`stranger:${activeStranger.id}`);
+    }
+
+    // Стан тротлінгу typing-подій цього сокета. Живе в пам'яті процесу — свідомо:
+    // для кількох інстансів знадобиться Socket.IO Redis adapter.
+    const lastTypingSentAt = new Map();
+    const isTypingThrottled = (key) => {
+      const now = Date.now();
+      if (now - (lastTypingSentAt.get(key) ?? 0) < TYPING_THROTTLE_MS) return true;
+      lastTypingSentAt.set(key, now);
+      return false;
+    };
+
+    // Надсилає подію лише співрозмовнику по діалогу (1:1).
+    // Повертає false, якщо користувач не є учасником діалогу — тоді нічого не надіслано.
+    async function emitToPartners(conversationId, event, payload) {
+      const participantIds = await getConversationParticipantIds(conversationId);
+      if (!participantIds.includes(socket.user.id)) return false;
+
+      const partnerRooms = participantIds
+        .filter((id) => id !== socket.user.id)
+        .map((id) => `user:${id}`);
+
+      if (partnerRooms.length > 0) io.to(partnerRooms).emit(event, payload);
+      return true;
     }
 
     // Приєднання до кімнати діалогу
@@ -157,6 +223,95 @@ export function setupSocket(io) {
         ack?.({ ok: true, message });
       } catch (err) {
         console.error('message:send error:', err);
+        ack?.({ ok: false, error: 'Внутрішня помилка' });
+      }
+    });
+
+    // Позначення діалогу прочитаним: піднімає watermark і повідомляє співрозмовника,
+    // щоб у відправника тіки стали «прочитано»
+    socket.on('conversation:read', async (data, ack) => {
+      try {
+        const parsed = joinLeaveSchema.safeParse(data);
+        if (!parsed.success) {
+          return ack?.({ ok: false, error: parsed.error.issues[0].message });
+        }
+
+        const { conversationId } = parsed.data;
+        const result = await markConversationRead(conversationId, socket.user.id);
+
+        // null означає «немає нових вхідних» або «не учасник». Навмисно не розрізняємо:
+        // інакше подія стала б оракулом для перебору чужих conversationId.
+        if (result) {
+          await emitToPartners(conversationId, 'message:read', {
+            conversationId,
+            userId: socket.user.id,
+            lastReadAt: result.lastReadAt,
+          });
+        }
+
+        ack?.({ ok: true });
+      } catch (err) {
+        console.error('conversation:read error:', err);
+        ack?.({ ok: false, error: 'Внутрішня помилка' });
+      }
+    });
+
+    // Підтвердження доставки повідомлення одержувачем (подвійна галочка у відправника)
+    socket.on('message:delivered', async (data, ack) => {
+      try {
+        const parsed = deliveredSchema.safeParse(data);
+        if (!parsed.success) {
+          return ack?.({ ok: false, error: parsed.error.issues[0].message });
+        }
+
+        const { messageId } = parsed.data;
+        const result = await markMessageDelivered(messageId, socket.user.id);
+
+        if (result) {
+          io.to(`user:${result.senderId}`).emit('message:delivered', {
+            conversationId: result.conversationId,
+            messageId,
+            userId: socket.user.id,
+            lastDeliveredAt: result.lastDeliveredAt,
+          });
+        }
+
+        ack?.({ ok: true });
+      } catch (err) {
+        console.error('message:delivered error:', err);
+        ack?.({ ok: false, error: 'Внутрішня помилка' });
+      }
+    });
+
+    // Індикатор «друкує…» у прямому діалозі.
+    // Сервер не зберігає стан: лише релеїть подію, а клієнт-одержувач сам гасить
+    // індикатор за таймаутом, тож втрачена подія isTyping:false нічого не ламає.
+    socket.on('typing', async (data, ack) => {
+      try {
+        const parsed = typingSchema.safeParse(data);
+        if (!parsed.success) {
+          return ack?.({ ok: false, error: parsed.error.issues[0].message });
+        }
+
+        const { conversationId, isTyping } = parsed.data;
+
+        // Глушимо лише старт: подію зупинки треба пропускати завжди, інакше індикатор залипне
+        if (isTyping && isTypingThrottled(`conversation:${conversationId}`)) {
+          return ack?.({ ok: true });
+        }
+
+        const sent = await emitToPartners(conversationId, 'typing', {
+          conversationId,
+          userId: socket.user.id,
+          isTyping,
+        });
+        if (!sent) {
+          return ack?.({ ok: false, error: 'Діалог не знайдено' });
+        }
+
+        ack?.({ ok: true });
+      } catch (err) {
+        console.error('typing error:', err);
         ack?.({ ok: false, error: 'Внутрішня помилка' });
       }
     });
@@ -277,6 +432,44 @@ export function setupSocket(io) {
       } catch (err) {
         console.error('stranger:message error:', err);
         ack?.({ ok: false, error: 'Не вдалося надіслати повідомлення' });
+      }
+    });
+
+    // «Друкує…» в анонімному чаті: релей партнеру по сесії, без збереження стану
+    socket.on('stranger:typing', (data, ack) => {
+      try {
+        const parsed = strangerTypingSchema.safeParse(data);
+        if (!parsed.success) {
+          return ack?.({ ok: false, error: parsed.error.issues[0].message });
+        }
+
+        const { sessionId, isTyping } = parsed.data;
+        const session = getSession(sessionId);
+        if (!session) {
+          return ack?.({ ok: false, error: 'Сесію не знайдено або вже завершено' });
+        }
+
+        const isUser1 = session.user1.id === socket.user.id;
+        const isUser2 = session.user2.id === socket.user.id;
+        if (!isUser1 && !isUser2) {
+          return ack?.({ ok: false, error: 'Ви не є учасником цієї сесії' });
+        }
+
+        if (isTyping && isTypingThrottled(`stranger:${sessionId}`)) {
+          return ack?.({ ok: true });
+        }
+
+        const partner = isUser1 ? session.user2 : session.user1;
+        io.to(`user:${partner.id}`).emit('stranger:typing', {
+          sessionId,
+          userId: socket.user.id,
+          isTyping,
+        });
+
+        ack?.({ ok: true });
+      } catch (err) {
+        console.error('stranger:typing error:', err);
+        ack?.({ ok: false, error: 'Внутрішня помилка' });
       }
     });
 
@@ -434,6 +627,24 @@ export function setupSocket(io) {
 
     // Розрив з'єднання сокета
     socket.on('disconnect', () => {
+      // Присутність рахуємо до будь-яких інших перевірок: якщо це був останній
+      // сокет користувача — фіксуємо час виходу і повідомляємо тих, кому він видимий.
+      const { wentOffline } = removeSocket(socket.user.id, socket.id);
+      if (wentOffline) {
+        touchLastSeen(socket.user.id)
+          .then((lastSeenAt) =>
+            // Поки йшов запис у БД, користувач міг перепідключитися:
+            // тоді стан перевіряємо ще раз, щоб не розіслати хибний «офлайн»
+            broadcastPresence(
+              io,
+              socket.user.id,
+              { isOnline: false, lastSeenAt },
+              () => !isOnline(socket.user.id),
+            ),
+          )
+          .catch((err) => console.error('presence disconnect error:', err));
+      }
+
       // Якщо у користувача ще є інші активні підключення (інші вкладки або оновлення транспорту),
       // не скидаємо його сесію передчасно
       const remainingSockets = io.sockets.adapter?.rooms?.get(`user:${socket.user.id}`);

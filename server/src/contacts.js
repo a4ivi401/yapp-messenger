@@ -1,11 +1,12 @@
 import { query } from './db.js';
+import { isOnline } from './presence.js';
 
 /**
  * Отримує список контактів користувача (відсортований за алфавітом).
  */
 export async function listContactsForUser(userId) {
   const { rows } = await query(
-    `SELECT u.id, u.username, c.created_at AS added_at
+    `SELECT u.id, u.username, u.last_seen_at, c.created_at AS added_at
        FROM contacts c
        JOIN users u ON u.id = c.contact_user_id
       WHERE c.user_id = $1
@@ -15,6 +16,8 @@ export async function listContactsForUser(userId) {
   return rows.map((r) => ({
     id: r.id,
     username: r.username,
+    isOnline: isOnline(r.id),
+    lastSeenAt: r.last_seen_at || null,
     addedAt: r.added_at,
   }));
 }
@@ -124,6 +127,7 @@ export async function searchUsers(currentUserId, queryStr, { limit = 20 } = {}) 
     `SELECT
        u.id,
        u.username,
+       u.last_seen_at,
        EXISTS (
          SELECT 1 FROM contacts c
           WHERE c.user_id = $1 AND c.contact_user_id = u.id
@@ -146,5 +150,7 @@ export async function searchUsers(currentUserId, queryStr, { limit = 20 } = {}) 
     id: r.id,
     username: r.username,
     isContact: Boolean(r.is_contact),
+    isOnline: isOnline(r.id),
+    lastSeenAt: r.last_seen_at || null,
   }));
 }

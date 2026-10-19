@@ -1,4 +1,5 @@
 import { query } from './db.js';
+import { isOnline } from './presence.js';
 
 /**
  * Канонічний порядок пари: менший UUID завжди перший.
@@ -65,7 +66,14 @@ function formatMatchRow(row, partner = null) {
     conversationId: row.conversation_id,
     createdAt: row.created_at,
     ...(partner
-      ? { partner: { id: partner.id, username: partner.username } }
+      ? {
+          partner: {
+            id: partner.id,
+            username: partner.username,
+            isOnline: isOnline(partner.id),
+            lastSeenAt: partner.lastSeenAt || null,
+          },
+        }
       : {}),
   };
 }
@@ -80,7 +88,8 @@ export async function listMatchesForUser(userId, { limit = 50 } = {}) {
        m.conversation_id,
        m.created_at,
        u.id       AS partner_id,
-       u.username AS partner_username
+       u.username AS partner_username,
+       u.last_seen_at AS partner_last_seen_at
      FROM matches m
      JOIN users u
        ON u.id = CASE WHEN m.user1_id = $1 THEN m.user2_id ELSE m.user1_id END
@@ -91,7 +100,11 @@ export async function listMatchesForUser(userId, { limit = 50 } = {}) {
   );
 
   return rows.map((r) =>
-    formatMatchRow(r, { id: r.partner_id, username: r.partner_username }),
+    formatMatchRow(r, {
+      id: r.partner_id,
+      username: r.partner_username,
+      lastSeenAt: r.partner_last_seen_at,
+    }),
   );
 }
 

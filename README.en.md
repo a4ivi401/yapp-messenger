@@ -26,7 +26,8 @@ A messenger where you can chat with a random stranger, and if a **match** happen
 | Chats and contacts from DB + username search | ✅ done |
 | Browser & audio chime notifications (Web Audio & Notifications API) | ✅ done |
 | Random anonymous chat, session exclusion & mutual match | ✅ done |
-| Media / voice messages / message statuses | 🎯 planned |
+| Message statuses «✓ sent → ✓✓ delivered → ✓✓ read» and "typing…" indicator (Socket.IO) | ✅ done |
+| Media / voice messages | 🎯 planned |
 
 ## Roadmap (2 weeks · ~2 h/day ≈ 28 h)
 
@@ -37,7 +38,7 @@ A messenger where you can chat with a random stranger, and if a **match** happen
 | **M0** | Project skeleton + auth | 1 | ✅ done |
 | **M1** | Live chat — the messenger core | 2–4 | ✅ done |
 | **M2** | Random stranger + matching (**twist**) | 5–6 | ✅ done |
-| **M3** | Statuses, media & extras | 7–11 | 🎯 next |
+| **M3** | Statuses, media & extras | 7–11 | 🚧 7 ✅ · 8–11 planned |
 | **M4** | Deployment & defense prep | 12–14 | 🎯 planned |
 
 ### 📅 Day-by-day
@@ -52,7 +53,7 @@ Priority legend: 🟣 **core** (can't pass without it) · ⚪ **leftover** (only
 | **4** ✅ | Chats and contacts from the DB: `contacts` model (migration 003), username search, audio chime & system notifications | 🟣 |
 | **5** ✅ | Random stranger: in-memory matchmaking queue (FIFO), session exclusion prevention, anonymous personas, ephemeral chat & mutual match to contacts | 🟣 |
 | **6** ✅ | Matching: `matches` model (migration 004), canonical UUID pair ordering, mutual match persistence in DB, stats API, realtime `match:new`, visual "🎲 Метч" badges | 🟣 |
-| **7** | "Delivered / read" statuses + "typing…" indicator over the socket | 🟣 minimum |
+| **7** ✅ | "Delivered / read" statuses + "typing…" indicator + real presence ("online" / "last seen …"): watermark model on `conversation_participants` (migration 005), `users.last_seen_at` (migration 006), `conversation:read`, `message:delivered`, `typing`, `presence:update` events; the "🎲 Match" badge was removed from the chat list and header (it will return as a separate accent) | 🟣 minimum |
 | **8** | Media: photos & files (`multer`, `uploads` volume), image previews | ⚪ |
 | **9** | Voice messages (MediaRecorder: record → upload → playback) | ⚪ |
 | **10** | Edit / delete messages + search across chats and contacts | ⚪ |
@@ -135,7 +136,7 @@ Open **http://localhost:5173**. (Kill the docker stack first if ports are taken:
 | POST | `/api/auth/login` | sign in |
 | POST | `/api/auth/logout` | sign out |
 | GET | `/api/auth/me` | current user (via cookie) |
-| GET | `/api/conversations` | user's conversations (with participant and last message preview) |
+| GET | `/api/conversations` | user's conversations (with participant, last message preview and read watermarks) |
 | POST | `/api/conversations` | `{ username }` — find or create direct conversation |
 | GET | `/api/conversations/:id` | conversation details (participant only) |
 | GET | `/api/conversations/:id/messages` | message history (includes `senderUsername`); pagination `?limit=50&before=<id>` |
@@ -146,6 +147,23 @@ Open **http://localhost:5173**. (Kill the docker stack first if ports are taken:
 | GET | `/api/matches` | user's mutual match history `{ matches }` |
 | GET | `/api/matches/stats` | aggregated user stats `{ matchesCount, contactsCount }` |
 | GET | `/api/users/search?q=...` | global user search by username substring with `isContact` flag |
+
+### Message statuses
+
+Receipts are not stored per message; they are stored as a **watermark on a conversation participant**
+(`conversation_participants.last_delivered_at` / `last_read_at`):
+
+- `last_delivered_at` — timestamp of the newest message the participant's client received;
+- `last_read_at` — timestamp of the newest message the participant has seen in the open chat.
+
+The sender derives each message status by comparing `message.createdAt` with the partner's watermarks:
+`✓` sent → `✓✓` delivered → `✓✓` read. N messages cost O(1) writes, and "read" always implies
+"delivered" (the read watermark lifts the delivered one too), so the impossible state
+"read but not delivered" cannot exist in the data. The model targets direct (1:1) chats;
+group chats would need a per-recipient receipts table.
+
+The conversation object exposes these watermarks as `otherUser.lastDeliveredAt` and
+`otherUser.lastReadAt`, so the client renders ticks right after loading history, with no extra request.
 
 ### Socket.IO (Realtime)
 
@@ -161,6 +179,10 @@ Upon connection, each authenticated user automatically joins their own private r
 | `conversation:join` | `{ conversationId }` | `{ ok: true }` or `{ ok: false, error }` | Join room `conversation:<id>` (participants only) |
 | `conversation:leave` | `{ conversationId }` | `{ ok: true }` | Leave conversation room |
 | `message:send` | `{ conversationId, body }` | `{ ok: true, message }` or `{ ok: false, error }` | Persist message to DB and broadcast to conversation room & participant private rooms |
+| `conversation:read` | `{ conversationId }` | `{ ok: true }` | Mark all incoming messages of the conversation as read (lifts the watermark) and notify the partner via `message:read`. Repeating with no new incoming messages is a no-op with no broadcast |
+| `message:delivered` | `{ messageId }` | `{ ok: true }` | Delivery acknowledgement from the recipient; the sender receives `message:delivered` |
+| `typing` | `{ conversationId, isTyping }` | `{ ok: true }` or `{ ok: false, error }` | "Typing…" indicator in a direct chat. The server only relays the event (stateless); starts are throttled to 500 ms per recipient |
+| `stranger:typing` | `{ sessionId, isTyping }` | `{ ok: true }` or `{ ok: false, error }` | Same for the anonymous chat |
 | `stranger:search` | — | `{ ok: true, status }` | Start searching for a random stranger or enter the FIFO queue |
 | `stranger:cancel` | — | `{ ok: true }` | Cancel search and remove from queue |
 | `stranger:message` | `{ sessionId, body }` | `{ ok: true, message }` | Send an ephemeral message to the stranger (up to 4000 characters) |
@@ -178,8 +200,13 @@ Upon connection, each authenticated user automatically joins their own private r
 | `stranger:match-invited` | `{ sessionId }` | Partner sent an invitation to exchange contacts |
 | `stranger:revealed` | `{ sessionId, conversationId, conversation, partner }` | Mutual match! Real usernames revealed, chat converted to permanent contact |
 | `stranger:left` | `{ sessionId, reason }` | Partner left or skipped to another stranger (`reason: 'next' \| 'left' \| 'disconnected'`) |
+| `message:read` | `{ conversationId, userId, lastReadAt }` | Partner read the conversation — ticks of own messages turn "read" |
+| `message:delivered` | `{ conversationId, messageId, userId, lastDeliveredAt }` | Partner's device received the message (ticks turn `✓✓`) |
+| `typing` | `{ conversationId, userId, isTyping }` | Partner is typing in a direct chat. The receiving client hides the indicator on its own after 4 s without new signals |
+| `stranger:typing` | `{ sessionId, userId, isTyping }` | Partner is typing in the anonymous chat |
 | `contact:new` | `{ contact }` | New contact added to user's list after mutual match |
 | `match:new` | `{ match }` | Realtime notification of newly recorded match to sync counters immediately |
+| `presence:update` | `{ userId, isOnline, lastSeenAt }` | User presence state change (connected / disconnected). Broadcast only to direct chat partners and contacts (privacy boundary) |
 
 ## Structure
 

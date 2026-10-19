@@ -24,6 +24,76 @@ function formatTimestamp(isoString) {
   return d.toLocaleDateString([], { day: '2-digit', month: '2-digit' });
 }
 
+// Тайминги індикатора «друкує…»
+const TYPING_THROTTLE_MS = 2000; // не частіше одного сигналу «друкую» за 2 с
+const TYPING_STOP_MS = 3000; // стільки тиші — і на сервер іде isTyping: false
+const TYPING_HIDE_MS = 4000; // стільки показуємо «друкує…» без нових сигналів
+
+const TICK_GLYPH = { sent: '✓', delivered: '✓✓', read: '✓✓' };
+const TICK_TITLE = { sent: 'Надіслано', delivered: 'Доставлено', read: 'Прочитано' };
+
+function laterIso(a, b) {
+  if (!a) return b || null;
+  if (!b) return a;
+  return new Date(a) >= new Date(b) ? a : b;
+}
+
+/**
+ * Статус власного повідомлення за watermark-ами співрозмовника.
+ * read ⊃ delivered ⊃ sent: водяний знак «прочитано» покриває всі старіші повідомлення,
+ * тому порівнюємо саме час, а не id (UUID v4 не впорядковані).
+ */
+function outgoingStatus(message, receipt) {
+  if (!receipt || !message?.createdAt) return 'sent';
+  const ts = new Date(message.createdAt).getTime();
+  if (receipt.lastReadAt && ts <= new Date(receipt.lastReadAt).getTime()) return 'read';
+  if (receipt.lastDeliveredAt && ts <= new Date(receipt.lastDeliveredAt).getTime()) {
+    return 'delivered';
+  }
+  return 'sent';
+}
+
+// ── Присутність ──────────────────────────────────────────────────────────────
+
+// Як часто перераховуємо відносний час («5 хв тому») для офлайн-співрозмовника
+const PRESENCE_TICK_MS = 30_000;
+
+/**
+ * Людський опис останньої появи в мережі.
+ * Стать користувача невідома, тому формулювання нейтральне («востаннє …»).
+ */
+function formatLastSeen(iso, nowMs = Date.now()) {
+  if (!iso) return 'не в мережі';
+
+  const then = new Date(iso);
+  const thenMs = then.getTime();
+  if (Number.isNaN(thenMs)) return 'не в мережі';
+
+  const minutes = Math.floor((nowMs - thenMs) / 60_000);
+  if (minutes < 1) return 'щойно в мережі';
+  if (minutes < 60) return `востаннє ${minutes} хв тому`;
+
+  const time = then.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+  const today = new Date(nowMs).toDateString();
+  const yesterday = new Date(nowMs - 86_400_000).toDateString();
+
+  if (then.toDateString() === today) return `востаннє о ${time}`;
+  if (then.toDateString() === yesterday) return `востаннє вчора о ${time}`;
+  return `востаннє ${then.toLocaleDateString([], { day: '2-digit', month: '2-digit' })} о ${time}`;
+}
+
+/**
+ * Актуальний стан присутності користувача.
+ * Live-мапа з подій socket має приоритет; дані з REST — початкове значення
+ * для тих, про кого подій ще не було.
+ */
+function presenceOf(user, presenceMap) {
+  if (!user) return { isOnline: false, lastSeenAt: null };
+  const live = presenceMap[user.id];
+  if (live) return live;
+  return { isOnline: Boolean(user.isOnline), lastSeenAt: user.lastSeenAt || null };
+}
+
 export default function Home() {
   const { user, logout } = useAuth();
 
@@ -45,6 +115,21 @@ export default function Home() {
   const [messages, setMessages] = useState([]);
   const [inputText, setInputText] = useState('');
   const [isLoadingMessages, setIsLoadingMessages] = useState(false);
+
+  // Watermark-и співрозмовника по діалогах: { [conversationId]: { lastReadAt, lastDeliveredAt } }.
+  // За ними виводиться статус власних повідомлень (✓ / ✓✓ / ✓✓ прочитано).
+  const [receipts, setReceipts] = useState({});
+
+  // Співрозмовник у активній розмові друкує
+  const [partnerTyping, setPartnerTyping] = useState(false);
+
+  // Присутність: { [userId]: { isOnline, lastSeenAt } }.
+  // Єдине джерело істини для UI; REST-відповіді лише наповнюють її початковими значеннями.
+  const [presence, setPresence] = useState({});
+
+  // Поточний час для відносних підписів «востаннє 5 хв тому»: оновлюється таймером,
+  // поки в заголовку показується офлайн-співрозмовник
+  const [nowMs, setNowMs] = useState(() => Date.now());
 
   // Стан анонімного чату
   const [strangerState, setStrangerState] = useState('idle'); // 'idle' | 'searching' | 'matched' | 'ended'
@@ -69,10 +154,43 @@ export default function Home() {
   const socketRef = useRef(null);
   const messagesEndRef = useRef(null);
 
+  // Таймери «друкує…». Refs, а не state: вони не впливають на рендер.
+  const typingStopTimerRef = useRef(null);
+  const typingHideTimerRef = useRef(null);
+  const typingSentAtRef = useRef(0); // 0 = сигнал «друкую» зараз не активний
+
   // Автоскрол до останнього повідомлення
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [messages]);
+
+  // Зливає присутність із REST-відповідей у live-мапу.
+  // Потрібно після перепідключення: сервер міг перезапуститися, і в мапі
+  // лишився б застарілий «онлайн», який уже ніколи не оновиться подією.
+  const syncPresence = useCallback((users) => {
+    const list = (users || []).filter(
+      (u) => u && u.id && typeof u.isOnline === 'boolean',
+    );
+    if (list.length === 0) return;
+
+    setPresence((prev) => {
+      let changed = false;
+      const next = { ...prev };
+      for (const u of list) {
+        const lastSeenAt = u.lastSeenAt || null;
+        const current = next[u.id];
+        if (
+          !current ||
+          current.isOnline !== u.isOnline ||
+          current.lastSeenAt !== lastSeenAt
+        ) {
+          next[u.id] = { isOnline: u.isOnline, lastSeenAt };
+          changed = true;
+        }
+      }
+      return changed ? next : prev;
+    });
+  }, []);
 
   // Завантаження діалогів та статистики профілю при першому вході
   const loadInitialData = useCallback(async () => {
@@ -81,13 +199,15 @@ export default function Home() {
         api.listConversations(),
         api.matchStats().catch(() => ({ matchesCount: 0, contactsCount: 0 })),
       ]);
-      setConversations(convsRes.conversations || []);
+      const loaded = convsRes.conversations || [];
+      setConversations(loaded);
+      syncPresence(loaded.map((conv) => conv.otherUser));
       setContactsCount(statsRes.contactsCount || 0);
       setMatchesCount(statsRes.matchesCount || 0);
     } catch (err) {
       console.error('Помилка завантаження даних:', err);
     }
-  }, []);
+  }, [syncPresence]);
 
   useEffect(() => {
     loadInitialData();
@@ -98,53 +218,132 @@ export default function Home() {
     requestNotificationPermission();
   }, []);
 
-  // Відкриття прямого діалогу
-  const openDirectConversation = useCallback((conv) => {
-    const prevChat = activeChatRef.current;
-    if (prevChat?.id === conv.id) return;
+  // ── «Друкує…»: надсилання сигналів ──────────────────────────────────────────
 
-    if (prevChat?.type === 'direct' && socketRef.current) {
-      socketRef.current.emit('conversation:leave', { conversationId: prevChat.id });
-    }
-    if (prevChat?.type === 'stranger' && socketRef.current) {
-      if (strangerStateRef.current === 'searching') {
-        socketRef.current.emit('stranger:cancel');
-      } else if (strangerStateRef.current === 'matched') {
-        socketRef.current.emit('stranger:leave');
-      }
-      setStrangerState('idle');
-      setStrangerSession(null);
-      setMatchRequested(false);
-      setPartnerMatchRequested(false);
-      setStrangerEndReason(null);
+  // Сигнал «друкую» / «перестав друкувати» в активний чат
+  const emitTyping = useCallback((isTyping) => {
+    const socket = socketRef.current;
+    const chat = activeChatRef.current;
+    if (!socket?.connected || !chat) return;
+
+    if (chat.type === 'direct') {
+      socket.emit('typing', { conversationId: chat.id, isTyping });
+      return;
     }
 
-    setActiveChat({
-      id: conv.id,
-      type: 'direct',
-      title: `@${conv.otherUser.username}`,
-      otherUser: conv.otherUser,
-      status: conv.isMatch ? 'знайомство з випадкового чату' : 'в мережі',
-      isMatch: Boolean(conv.isMatch),
-    });
-
-    setIsLoadingMessages(true);
-    api
-      .listMessages(conv.id)
-      .then((res) => {
-        setMessages(res.messages || []);
-      })
-      .catch((err) => {
-        console.error('Помилка завантаження повідомлень:', err);
-      })
-      .finally(() => {
-        setIsLoadingMessages(false);
-      });
-
-    if (socketRef.current) {
-      socketRef.current.emit('conversation:join', { conversationId: conv.id });
+    const sessionId = strangerSessionRef.current?.sessionId;
+    if (chat.type === 'stranger' && sessionId) {
+      socket.emit('stranger:typing', { sessionId, isTyping });
     }
   }, []);
+
+  // Гасить сигнал, лише якщо він був активний — щоб не плодити зайвих подій
+  const stopTyping = useCallback(() => {
+    clearTimeout(typingStopTimerRef.current);
+    typingStopTimerRef.current = null;
+    if (typingSentAtRef.current === 0) return;
+    typingSentAtRef.current = 0;
+    emitTyping(false);
+  }, [emitTyping]);
+
+  // Викликається на кожне натискання: тротлить старт і перезапускає таймер зупинки
+  const notifyTyping = useCallback(() => {
+    const now = Date.now();
+    if (now - typingSentAtRef.current >= TYPING_THROTTLE_MS) {
+      typingSentAtRef.current = now;
+      emitTyping(true);
+    }
+    clearTimeout(typingStopTimerRef.current);
+    typingStopTimerRef.current = setTimeout(stopTyping, TYPING_STOP_MS);
+  }, [emitTyping, stopTyping]);
+
+  // Позначає відкритий діалог прочитаним. Тротлінг не потрібен: сервер сам пропускає
+  // UPDATE, якщо нових вхідних немає, тож повторні події коштують один індексний запит
+  // і нічого не розсилають. Натомість будь-яке вхідне в відкритому чаті гарантовано
+  // стає прочитаним — без «завислих» ✓✓ через вікно тротлінгу.
+  const markActiveChatRead = useCallback(() => {
+    const socket = socketRef.current;
+    const chat = activeChatRef.current;
+    if (!socket?.connected || chat?.type !== 'direct') return;
+    if (typeof document !== 'undefined' && document.hidden) return;
+
+    socket.emit('conversation:read', { conversationId: chat.id });
+  }, []);
+
+  // Таймери «друкує…» не мають пережити розмонтування компонента
+  useEffect(
+    () => () => {
+      clearTimeout(typingStopTimerRef.current);
+      clearTimeout(typingHideTimerRef.current);
+    },
+    [],
+  );
+
+  // Відкриття прямого діалогу
+  const openDirectConversation = useCallback(
+    (conv) => {
+      const prevChat = activeChatRef.current;
+      if (prevChat?.id === conv.id) return;
+
+      stopTyping();
+
+      if (prevChat?.type === 'direct' && socketRef.current) {
+        socketRef.current.emit('conversation:leave', { conversationId: prevChat.id });
+      }
+      if (prevChat?.type === 'stranger' && socketRef.current) {
+        if (strangerStateRef.current === 'searching') {
+          socketRef.current.emit('stranger:cancel');
+        } else if (strangerStateRef.current === 'matched') {
+          socketRef.current.emit('stranger:leave');
+        }
+        setStrangerState('idle');
+        setStrangerSession(null);
+        setMatchRequested(false);
+        setPartnerMatchRequested(false);
+        setStrangerEndReason(null);
+      }
+
+      setActiveChat({
+        id: conv.id,
+        type: 'direct',
+        title: `@${conv.otherUser.username}`,
+        otherUser: conv.otherUser,
+        // Бейдж «🎲 Метч» прибрано з UI: isMatch лишається в даних під окремий
+        // акцент у майбутньому. Підпис у заголовку тепер береться з присутності.
+        isMatch: Boolean(conv.isMatch),
+      });
+
+      // Свіжий онлайн-стан на момент відкриття діалогу
+      syncPresence([conv.otherUser]);
+
+      // Стартові watermark-и співрозмовника, щоб тіки були коректними до першої події
+      setReceipts((prev) => ({
+        ...prev,
+        [conv.id]: {
+          lastDeliveredAt: conv.otherUser?.lastDeliveredAt || null,
+          lastReadAt: conv.otherUser?.lastReadAt || null,
+        },
+      }));
+
+      setIsLoadingMessages(true);
+      api
+        .listMessages(conv.id)
+        .then((res) => {
+          setMessages(res.messages || []);
+        })
+        .catch((err) => {
+          console.error('Помилка завантаження повідомлень:', err);
+        })
+        .finally(() => {
+          setIsLoadingMessages(false);
+        });
+
+      if (socketRef.current) {
+        socketRef.current.emit('conversation:join', { conversationId: conv.id });
+      }
+    },
+    [stopTyping, syncPresence],
+  );
 
   // Підключення та обробка Socket.IO
   useEffect(() => {
@@ -156,9 +355,30 @@ export default function Home() {
 
     socket.on('connect', () => {
       // Якщо вже відкритий чат, повторно приєднуємося до кімнати
-      if (activeChatRef.current?.type === 'direct') {
-        socket.emit('conversation:join', { conversationId: activeChatRef.current.id });
-      }
+      const chat = activeChatRef.current;
+      if (chat?.type !== 'direct') return;
+
+      socket.emit('conversation:join', { conversationId: chat.id });
+      // Поки сокет був відключений, співрозмовник міг прочитати діалог —
+      // тому перечитуємо watermark-и з REST, а не покладаємось лише на події
+      api
+        .getConversation(chat.id)
+        .then((res) => {
+          const other = res.conversation?.otherUser;
+          if (!other) return;
+          setReceipts((prev) => ({
+            ...prev,
+            [chat.id]: {
+              lastDeliveredAt: other.lastDeliveredAt || null,
+              lastReadAt: other.lastReadAt || null,
+            },
+          }));
+          // Онлайн-стан теж міг застаріти, поки сокет був відключений
+          syncPresence([other]);
+        })
+        .catch(() => {});
+      // Позначаємо прочитаним ще раз — вхідні за час відключення могли не потрапити у watermark
+      markActiveChatRead();
     });
 
     // Отримання нового повідомлення в реальному часі
@@ -167,6 +387,12 @@ export default function Home() {
 
       const currentChat = activeChatRef.current;
       const isIncoming = message.senderId !== user.id;
+
+      // Підтверджуємо доставку — завдяки цьому у відправника з'являється ✓✓,
+      // навіть якщо одержувач сидить в іншому діалозі
+      if (isIncoming) {
+        socket.emit('message:delivered', { messageId: message.id });
+      }
 
       // Звукове сповіщення та браузерне повідомлення
       if (isIncoming) {
@@ -200,6 +426,9 @@ export default function Home() {
           if (prev.some((m) => m.id === message.id)) return prev;
           return [...prev, message];
         });
+
+        // Чат відкритий і вкладка видима — повідомлення одразу стає прочитаним
+        if (isIncoming) markActiveChatRead();
       }
 
       // Оновлюємо сайдбар: змінюємо lastMessage та переміщуємо діалог на перше місце
@@ -234,6 +463,73 @@ export default function Home() {
           return prev;
         }
       });
+    });
+
+    // ==========================================
+    // Квитанції: прочитано / доставлено
+    // ==========================================
+
+    // Співрозмовник прочитав діалог. «Прочитано» завжди покриває «доставлено»,
+    // тому піднімаємо обидва watermark-и — стан «прочитано, але не доставлено» неможливий.
+    socket.on('message:read', ({ conversationId, lastReadAt }) => {
+      if (!conversationId || !lastReadAt) return;
+
+      setReceipts((prev) => {
+        const current = prev[conversationId] || {};
+        const readAt = laterIso(current.lastReadAt, lastReadAt);
+        return {
+          ...prev,
+          [conversationId]: {
+            lastReadAt: readAt,
+            lastDeliveredAt: laterIso(current.lastDeliveredAt, readAt),
+          },
+        };
+      });
+    });
+
+    // Співрозмовник отримав повідомлення на свій пристрій
+    socket.on('message:delivered', ({ conversationId, lastDeliveredAt }) => {
+      if (!conversationId || !lastDeliveredAt) return;
+
+      setReceipts((prev) => {
+        const current = prev[conversationId] || {};
+        return {
+          ...prev,
+          [conversationId]: {
+            ...current,
+            lastDeliveredAt: laterIso(current.lastDeliveredAt, lastDeliveredAt),
+          },
+        };
+      });
+    });
+
+    // ==========================================
+    // Індикатор «друкує…»
+    // ==========================================
+
+    // Сервер не зберігає стан індикатора, тому гасимо його самі за таймаутом:
+    // втрачена подія isTyping: false залишить «друкує…» максимум на TYPING_HIDE_MS.
+    const showPartnerTyping = (chatId, isTyping) => {
+      if (activeChatRef.current?.id !== chatId) return;
+
+      clearTimeout(typingHideTimerRef.current);
+      typingHideTimerRef.current = null;
+
+      if (!isTyping) {
+        setPartnerTyping(false);
+        return;
+      }
+
+      setPartnerTyping(true);
+      typingHideTimerRef.current = setTimeout(() => setPartnerTyping(false), TYPING_HIDE_MS);
+    };
+
+    socket.on('typing', ({ conversationId, isTyping }) => {
+      showPartnerTyping(conversationId, isTyping);
+    });
+
+    socket.on('stranger:typing', ({ sessionId, isTyping }) => {
+      showPartnerTyping(sessionId, isTyping);
     });
 
     // ==========================================
@@ -330,8 +626,9 @@ export default function Home() {
     });
 
     // Обопільна згода — розкриття нікнеймів та конвертація у постійний чат
-    socket.on('stranger:revealed', async ({ conversationId, partner }) => {
+    socket.on('stranger:revealed', async ({ conversationId, conversation, partner }) => {
       playNotificationSound();
+      stopTyping();
       setStrangerState('idle');
       setStrangerSession(null);
       setMatchRequested(false);
@@ -344,9 +641,19 @@ export default function Home() {
         type: 'direct',
         title: `@${partner.username}`,
         otherUser: partner,
-        status: 'знайомство з випадкового чату',
+        // Бейдж «🎲 Метч» прибрано з UI (isMatch лишається в даних);
+        // підпис у заголовку береться з присутності, а не з цього поля
         isMatch: true,
       });
+
+      // Стартові watermark-и співрозмовника для тіків
+      setReceipts((prev) => ({
+        ...prev,
+        [conversationId]: {
+          lastDeliveredAt: conversation?.otherUser?.lastDeliveredAt || null,
+          lastReadAt: conversation?.otherUser?.lastReadAt || null,
+        },
+      }));
 
       // Приєднуємо сокет до постійної кімнати діалогу
       if (socketRef.current) {
@@ -417,10 +724,74 @@ export default function Home() {
       setMatchesCount((prev) => prev + 1);
     });
 
+    // Присутність: сервер надсилає подію лише тим, кому видно цього користувача
+    // (спільні діалоги та контакти), тому тут не потрібна жодна фільтрація
+    socket.on('presence:update', ({ userId, isOnline, lastSeenAt }) => {
+      setPresence((prev) => ({
+        ...prev,
+        [userId]: { isOnline, lastSeenAt: lastSeenAt || null },
+      }));
+    });
+
     return () => {
       socket.disconnect();
     };
-  }, [user.id, openDirectConversation, loadInitialData]);
+  }, [user.id, openDirectConversation, loadInitialData, markActiveChatRead, stopTyping, syncPresence]);
+
+  // Позначаємо відкритий діалог прочитаним при відкритті та поверненні фокусу у вкладку
+  useEffect(() => {
+    if (activeChat?.type !== 'direct') return undefined;
+
+    markActiveChatRead();
+
+    const onFocus = () => markActiveChatRead();
+    const onVisibilityChange = () => {
+      if (!document.hidden) markActiveChatRead();
+    };
+
+    window.addEventListener('focus', onFocus);
+    document.addEventListener('visibilitychange', onVisibilityChange);
+    return () => {
+      window.removeEventListener('focus', onFocus);
+      document.removeEventListener('visibilitychange', onVisibilityChange);
+    };
+  }, [activeChat?.id, activeChat?.type, markActiveChatRead]);
+
+  // Перемикання чату скидає індикатор «друкує…» попереднього співрозмовника
+  useEffect(() => {
+    setPartnerTyping(false);
+    clearTimeout(typingHideTimerRef.current);
+    typingHideTimerRef.current = null;
+  }, [activeChat?.id]);
+
+  // ── Присутність: похідні значення для рендеру ────────────────────────────
+
+  const activePresence = presenceOf(activeChat?.otherUser, presence);
+
+  // Підпис у заголовку. Для прямого діалогу це реальний онлайн-стан із сокета
+  // (або «востаннє …»). Для анонімного — стан сесії, який уже веде існуючий код:
+  // «пошук співрозмовника…», «в мережі», «розмову завершено».
+  let headerStatus = '';
+
+  if (activeChat?.type === 'direct') {
+    headerStatus = activePresence.isOnline
+      ? 'в мережі'
+      : formatLastSeen(activePresence.lastSeenAt, nowMs);
+  } else if (activeChat) {
+    headerStatus = activeChat.status || '';
+  }
+
+  const headerIsOffline = activeChat?.type === 'direct' && !activePresence.isOnline;
+
+  // Відносний час має «тікати» сам, але перерендер потрібен лише тоді,
+  // коли в заголовку справді показаний офлайн-співрозмовник
+  useEffect(() => {
+    if (!headerIsOffline || activeChat?.type !== 'direct') return undefined;
+
+    setNowMs(Date.now());
+    const timer = setInterval(() => setNowMs(Date.now()), PRESENCE_TICK_MS);
+    return () => clearInterval(timer);
+  }, [headerIsOffline, activeChat?.type, activeChat?.id]);
 
   // Глобальний пошук користувачів із дебаунсом 250 мс
   useEffect(() => {
@@ -437,6 +808,7 @@ export default function Home() {
         .searchUsers(clean)
         .then((res) => {
           setSearchResults(res.users || []);
+          syncPresence(res.users || []);
         })
         .catch((err) => {
           console.error('Помилка пошуку:', err);
@@ -447,7 +819,7 @@ export default function Home() {
     }, 250);
 
     return () => clearTimeout(timeout);
-  }, [searchQuery]);
+  }, [searchQuery, syncPresence]);
 
   // Початок діалогу із знайденим користувачем
   const handleSelectFoundUser = async (targetUser) => {
@@ -492,6 +864,18 @@ export default function Home() {
     }
   };
 
+  // Введення тексту: оновлює поле і сигналізує співрозмовнику «друкує…»
+  const handleInputChange = (e) => {
+    const value = e.target.value;
+    setInputText(value);
+
+    if (value.trim()) {
+      notifyTyping();
+    } else {
+      stopTyping();
+    }
+  };
+
   // Відправка повідомлення
   const handleSendMessage = async (e) => {
     e.preventDefault();
@@ -499,6 +883,7 @@ export default function Home() {
     if (!text || !activeChat) return;
 
     setInputText('');
+    stopTyping();
 
     if (activeChat.type === 'stranger') {
       const sessionId = strangerSessionRef.current?.sessionId || activeChat.id;
@@ -546,6 +931,7 @@ export default function Home() {
 
   // Початок пошуку випадкового співрозмовника
   const startStrangerSearch = () => {
+    stopTyping();
     const prevChat = activeChatRef.current;
     if (prevChat?.type === 'direct' && socketRef.current) {
       socketRef.current.emit('conversation:leave', { conversationId: prevChat.id });
@@ -577,6 +963,7 @@ export default function Home() {
 
   // Скасування пошуку
   const handleCancelSearch = () => {
+    stopTyping();
     if (socketRef.current?.connected) {
       socketRef.current.emit('stranger:cancel');
     }
@@ -590,6 +977,7 @@ export default function Home() {
 
   // Перехід до наступного співрозмовника («🎲 Інший»)
   const handleNextStranger = () => {
+    stopTyping();
     setStrangerState('searching');
     setStrangerSession(null);
     setMatchRequested(false);
@@ -641,6 +1029,7 @@ export default function Home() {
 
   // Завершення розмови зі сторони користувача
   const handleLeaveStranger = () => {
+    stopTyping();
     if (socketRef.current?.connected) {
       if (strangerStateRef.current === 'searching') {
         socketRef.current.emit('stranger:cancel');
@@ -657,6 +1046,7 @@ export default function Home() {
   };
 
   const handleBackToList = () => {
+    stopTyping();
     if (activeChat?.type === 'direct' && socketRef.current) {
       socketRef.current.emit('conversation:leave', { conversationId: activeChat.id });
       setActiveChat(null);
@@ -757,18 +1147,18 @@ export default function Home() {
                           setSearchQuery('');
                         }}
                       >
-                        <div className="chat-row-avatar">{initials}</div>
+                        <div className="chat-row-avatar">
+                          {initials}
+                          {presenceOf(conv.otherUser, presence).isOnline && (
+                            <span className="presence-dot" aria-label="У мережі" />
+                          )}
+                        </div>
                         <div className="chat-row-body">
                           <div className="chat-row-line1">
                             <div className="chat-row-title-wrap">
                               <span className="chat-row-name">
                                 @{conv.otherUser?.username}
                               </span>
-                              {conv.isMatch && (
-                                <span className="match-badge" title="Знайдено у випадковому чаті">
-                                  🎲 Метч
-                                </span>
-                              )}
                             </div>
                             <span className="chat-row-time">
                               {formatTimestamp(
@@ -805,7 +1195,12 @@ export default function Home() {
                       onClick={() => handleSelectFoundUser(targetUser)}
                       style={{ cursor: 'pointer' }}
                     >
-                      <div className="chat-row-avatar">{initials}</div>
+                      <div className="chat-row-avatar">
+                        {initials}
+                        {presenceOf(targetUser, presence).isOnline && (
+                          <span className="presence-dot" aria-label="У мережі" />
+                        )}
+                      </div>
                       <div className="chat-row-body">
                         <div className="chat-row-line1">
                           <span className="chat-row-name">
@@ -866,18 +1261,20 @@ export default function Home() {
                       className={`chat-row ${isActive ? 'active' : ''}`}
                       onClick={() => openDirectConversation(conv)}
                     >
-                      <div className="chat-row-avatar">{initials}</div>
+                      <div className="chat-row-avatar">
+                        {initials}
+                        {presenceOf(conv.otherUser, presence).isOnline && (
+                          <span className="presence-dot" aria-label="У мережі" />
+                        )}
+                      </div>
                       <div className="chat-row-body">
                         <div className="chat-row-line1">
                           <div className="chat-row-title-wrap">
                             <span className="chat-row-name">
                               @{conv.otherUser.username}
                             </span>
-                            {conv.isMatch && (
-                              <span className="match-badge" title="Знайдено у випадковому чаті">
-                                🎲 Метч
-                              </span>
-                            )}
+                            {/* Бейдж «🎲 Метч» прибрано зі списку чатів: isMatch лишається
+                                в даних і повернеться окремим акцентом поза рядком діалогу. */}
                           </div>
                           <span className="chat-row-time">
                             {formatTimestamp(
@@ -931,13 +1328,14 @@ export default function Home() {
               <div className="chat-target-meta">
                 <h2>
                   <span className="chat-target-name">{activeChat.title}</span>
-                  {activeChat.isMatch && (
-                    <span className="match-badge" title="Знайдено у випадковому чаті">
-                      🎲 Метч
-                    </span>
-                  )}
                 </h2>
-                <span className="chat-target-status">{activeChat.status}</span>
+                <span
+                  className={`chat-target-status ${partnerTyping ? 'is-typing' : ''} ${
+                    headerIsOffline ? 'is-offline' : ''
+                  }`}
+                >
+                  {partnerTyping ? 'друкує…' : headerStatus}
+                </span>
               </div>
               <div className="chat-header-actions">
                 {activeChat.type === 'stranger' && strangerState === 'matched' && (
@@ -1036,6 +1434,12 @@ export default function Home() {
                         );
                       }
                       const isMe = msg.senderId === user.id;
+                      // Статус показуємо лише для власних повідомлень у прямому діалозі:
+                      // в анонімному чаті повідомлення ефемерні й квитанцій не мають
+                      const tickStatus =
+                        isMe && activeChat.type === 'direct'
+                          ? outgoingStatus(msg, receipts[activeChat.id])
+                          : null;
                       return (
                         <div
                           key={msg.id}
@@ -1059,7 +1463,15 @@ export default function Home() {
                               <span className="message-time">
                                 {formatTimestamp(msg.createdAt)}
                               </span>
-                              {isMe && <span className="message-ticks">✓</span>}
+                              {tickStatus && (
+                                <span
+                                  className={`message-ticks is-${tickStatus}`}
+                                  title={TICK_TITLE[tickStatus]}
+                                  aria-label={TICK_TITLE[tickStatus]}
+                                >
+                                  {TICK_GLYPH[tickStatus]}
+                                </span>
+                              )}
                             </div>
                           </div>
                         </div>
@@ -1090,7 +1502,7 @@ export default function Home() {
                       type="text"
                       placeholder="Напишіть повідомлення..."
                       value={inputText}
-                      onChange={(e) => setInputText(e.target.value)}
+                      onChange={handleInputChange}
                       autoFocus
                     />
                     <button

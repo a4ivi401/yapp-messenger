@@ -12,6 +12,7 @@
   --bubble-in: #ffffff;
   --chat-bg: #ece9f4;
   --online: #22c55e;
+  --tick-read: #5eead4;
   --shadow-sm: 0 2px 8px rgba(28, 25, 44, 0.06);
   --shadow-md: 0 12px 32px rgba(28, 25, 44, 0.08);
   --header-h: 64px;
@@ -304,6 +305,23 @@ body {
   letter-spacing: 0.5px;
   background: var(--accent-soft);
   color: var(--accent);
+  /* позиційний контекст для індикатора присутності */
+  position: relative;
+}
+
+/* Зелена точка «зараз у мережі».
+   Обведення кольором панелі відділяє її від аватара при будь-якому фоні рядка. */
+.presence-dot {
+  position: absolute;
+  right: -1px;
+  bottom: -1px;
+  width: 13px;
+  height: 13px;
+  border-radius: 50%;
+  background: var(--online);
+  border: 2.5px solid var(--panel);
+  box-sizing: content-box;
+  box-shadow: 0 0 0 1px rgba(28, 25, 44, 0.08);
 }
 
 .chat-row-avatar.stranger-avatar {
@@ -577,6 +595,16 @@ body {
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+}
+
+/* Офлайн-підпис «востаннє …» — приглушений, щоб не конкурувати з активним чатом */
+.chat-target-status.is-offline {
+  color: var(--muted);
+}
+
+.chat-target-status.is-typing {
+  color: var(--online);
+  font-style: italic;
 }
 
 .chat-header-actions {
@@ -971,6 +999,23 @@ body {
 .message-ticks {
   font-size: 11px;
   opacity: 0.8;
+}
+
+/* Статус власного повідомлення: ✓ надіслано → ✓✓ доставлено → ✓✓ прочитано.
+   Стан розрізняється не лише кольором: у «доставлено» інша кількість галочок,
+   тож статус читається і без кольору (колір — додатковий сигнал). */
+.message-ticks.is-sent {
+  opacity: 0.55;
+}
+
+.message-ticks.is-delivered {
+  opacity: 0.85;
+}
+
+.message-ticks.is-read {
+  color: var(--tick-read);
+  opacity: 1;
+  font-weight: 700;
 }
 
 /* Chat input bar */
