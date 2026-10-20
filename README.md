@@ -54,7 +54,7 @@
 | **5** ✅ | Випадковий співрозмовник: черга підбору в пам'яті (FIFO), захист від повторної зустрічі в сесії, анонімні образи, ефемерний чат і обопільний метч у контакти | 🟣 |
 | **6** ✅ | Метчинг: модель `matches` (міграція 004), канонічне впорядкування пар UUID, збереження взаємного метчу в БД при обопільній згоді, статистика метчів, realtime `match:new`, бейджі «🎲 Метч» | 🟣 |
 | **7** ✅ | Статуси «доставлено / прочитано» + індикатор «друкує…» + реальна присутність («в мережі» / «востаннє …»): watermark-модель `conversation_participants` (міграція 005), `users.last_seen_at` (міграція 006), події `conversation:read`, `message:delivered`, `typing`, `presence:update`; бейдж «🎲 Метч» прибрано зі списку чатів і шапки (повернеться окремим акцентом) | 🟣 мінімум |
-| **8** | Медіа: фото й файли (`multer`, volume `uploads`), прев'ю зображень | ⚪ |
+| **8** ✅ | Медіа: фото й файли (`multer`, volume `uploads`), прев'ю зображень, модальний lightbox, безпечне збереження та скачування | ⚪ |
 | **9** | Голосові повідомлення (MediaRecorder: запис → завантаження → програвання) | ⚪ |
 | **10** | Редагування / видалення повідомлень + пошук по чатах і контактах | ⚪ |
 | **11** | Блок / скарга в анонімному чаті + базовий rate-limit | ⚪ |
@@ -140,13 +140,16 @@ npm run dev              # сервер :3001 + фронт :5173 одночас�
 | POST | `/api/conversations` | `{ username }` — почати або відкрити наявний прямий діалог |
 | GET | `/api/conversations/:id` | деталі діалогу (лише для учасника) |
 | GET | `/api/conversations/:id/messages` | історія повідомлень (містить `senderUsername`); пагінація `?limit=50&before=<id>` |
-| POST | `/api/conversations/:id/messages` | `{ body }` — надіслати повідомлення |
+| POST | `/api/conversations/:id/messages` | `{ body?, attachment? }` — надіслати повідомлення (текст, вкладення або обидва) |
 | GET | `/api/contacts` | список збережених контактів користувача та загальна кількість `{ contacts, count }` |
 | POST | `/api/contacts` | `{ username }` або `{ userId }` — додати користувача в контакти (ідемпотентно, валідація само-додавання) |
 | DELETE | `/api/contacts/:userId` | видалити користувача з контактів за UUID |
 | GET | `/api/matches` | історія взаємних метчів користувача `{ matches }` |
 | GET | `/api/matches/stats` | зведена статистика користувача `{ matchesCount, contactsCount }` |
 | GET | `/api/users/search?q=...` | глобальний пошук користувачів за підрядком нікнейму з прапорцем `isContact` |
+| POST | `/api/uploads` | `multipart/form-data` з полем `file` — завантаження фото або файлу (до 20 МБ); повертає `{ attachment: { url, type, name, size, mime } }` |
+| GET | `/api/uploads/files/:filename` | пряма роздача медіафайлу з `Cache-Control: immutable` та `X-Content-Type-Options: nosniff` |
+| GET | `/api/uploads/download/:filename?name=...` | безпечне скачування файлу з оригінальною назвою (`Content-Disposition: attachment`) |
 
 ### Статуси повідомлень
 
@@ -179,14 +182,14 @@ npm run dev              # сервер :3001 + фронт :5173 одночас�
 |---|---|---|---|
 | `conversation:join` | `{ conversationId }` | `{ ok: true }` або `{ ok: false, error }` | Приєднання до кімнати діалогу `conversation:<id>` (доступно лише учасникам) |
 | `conversation:leave` | `{ conversationId }` | `{ ok: true }` | Вихід із кімнати діалогу |
-| `message:send` | `{ conversationId, body }` | `{ ok: true, message }` або `{ ok: false, error }` | Збереження повідомлення в БД та трансляція в кімнату діалогу та особисті кімнати учасників |
+| `message:send` | `{ conversationId, body?, attachment? }` | `{ ok: true, message }` або `{ ok: false, error }` | Збереження повідомлення в БД та трансляція в кімнату діалогу та особисті кімнати учасників (підтримує текст, медіавкладення або обидва) |
 | `conversation:read` | `{ conversationId }` | `{ ok: true }` | Позначає всі вхідні діалогу прочитаними (піднімає watermark) і повідомляє співрозмовника подією `message:read`. Повторний виклик без нових вхідних — no-op без broadcast |
 | `message:delivered` | `{ messageId }` | `{ ok: true }` | Підтвердження доставки повідомлення одержувачем; відправник отримує `message:delivered` |
 | `typing` | `{ conversationId, isTyping }` | `{ ok: true }` або `{ ok: false, error }` | Індикатор «друкує…» у прямому діалозі. Сервер лише релеїть подію (без стану), старт тротлиться 500 мс на адресата |
 | `stranger:typing` | `{ sessionId, isTyping }` | `{ ok: true }` або `{ ok: false, error }` | Те саме для анонімного чату |
 | `stranger:search` | — | `{ ok: true, status }` | Початок пошуку випадкового співрозмовника або постановка в FIFO чергу |
 | `stranger:cancel` | — | `{ ok: true }` | Скасування пошуку та видалення з черги |
-| `stranger:message` | `{ sessionId, body }` | `{ ok: true, message }` | Відправка ефемерного повідомлення незнайомцю (до 4000 символів) |
+| `stranger:message` | `{ sessionId, body?, attachment? }` | `{ ok: true, message }` | Відправка ефемерного повідомлення незнайомцю (текст до 4000 символів, медіавкладення або обидва) |
 | `stranger:next` | — | `{ ok: true, status }` | Пропуск співрозмовника («🎲 Інший»): фіксація виключення пари з повторного підбору в сесії та негайний новий пошук |
 | `stranger:leave` | — | `{ ok: true }` | Завершення розмови зі співрозмовником з виключенням повторного підбору |
 | `stranger:match-request` | `{ sessionId }` | `{ ok: true, mutual }` | Запит «🤝 Додати в контакти». При обопільній згоді зберігає повідомлення в БД і відкриває особистості |
@@ -227,4 +230,5 @@ yapp-messenger/
 - Паролі — `crypto.scrypt` із випадковою сіллю (`salt:hash`), звірення через `timingSafeEqual`.
 - Сесії — випадковий токен у БД, передається лише в httpOnly cookie.
 - Усюди параметризовані SQL-запити; валідація вводу через zod.
+- Завантаження файлів — обмеження розміру 20 МБ, блокування небезпечних/виконуваних розширень (.exe, .bat, .sh, .php тощо), валідація UUID-імен сховища проти path traversal, ізольований volume `uploads`.
 - У плані: HTTPS на деплої.

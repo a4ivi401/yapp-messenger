@@ -69,6 +69,6 @@ export function playNotificationSound() {
     osc2.start(now + 0.08);
     osc2.stop(now + 0.45);
   } catch (err) {
-    console.debug('Не вдалося відтворити звук сповіщення:', err);
+    console.debug('Failed to play notification audio:', err);
   }
 }

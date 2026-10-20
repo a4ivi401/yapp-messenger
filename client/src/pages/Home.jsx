@@ -24,6 +24,31 @@ function formatTimestamp(isoString) {
   return d.toLocaleDateString([], { day: '2-digit', month: '2-digit' });
 }
 
+function formatFileSize(bytes) {
+  if (!bytes || bytes <= 0) return '';
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+function formatMessagePreview(lastMessage, fallback = 'Немає повідомлень') {
+  if (!lastMessage) return fallback;
+  if (lastMessage.body && lastMessage.body.trim()) {
+    if (lastMessage.attachment) {
+      const prefix = lastMessage.attachment.type === 'image' ? '📷 ' : '📎 ';
+      return `${prefix}${lastMessage.body}`;
+    }
+    return lastMessage.body;
+  }
+  if (lastMessage.attachment) {
+    if (lastMessage.attachment.type === 'image') return '📷 Фото';
+    if (lastMessage.attachment.type === 'audio') return '🎵 Аудіо';
+    if (lastMessage.attachment.type === 'video') return '🎥 Відео';
+    return `📎 ${lastMessage.attachment.name || 'Файл'}`;
+  }
+  return fallback;
+}
+
 // Тайминги індикатора «друкує…»
 const TYPING_THROTTLE_MS = 2000; // не частіше одного сигналу «друкую» за 2 с
 const TYPING_STOP_MS = 3000; // стільки тиші — і на сервер іде isTyping: false
@@ -53,7 +78,10 @@ function outgoingStatus(message, receipt) {
   return 'sent';
 }
 
-// ── Присутність ──────────────────────────────────────────────────────────────
+// ── Присутність та файли ──────────────────────────────────────────────────
+
+// Максимальний розмір файлу для завантаження (100 МБ)
+const MAX_UPLOAD_BYTES = 100 * 1024 * 1024;
 
 // Як часто перераховуємо відносний час («5 хв тому») для офлайн-співрозмовника
 const PRESENCE_TICK_MS = 30_000;
@@ -116,6 +144,13 @@ export default function Home() {
   const [inputText, setInputText] = useState('');
   const [isLoadingMessages, setIsLoadingMessages] = useState(false);
 
+  // Прикріплення медіа (файл/фото)
+  const [stagedAttachment, setStagedAttachment] = useState(null);
+  const [isUploadingAttachment, setIsUploadingAttachment] = useState(false);
+  const [uploadError, setUploadError] = useState(null);
+  const [lightboxImage, setLightboxImage] = useState(null);
+  const fileInputRef = useRef(null);
+
   // Watermark-и співрозмовника по діалогах: { [conversationId]: { lastReadAt, lastDeliveredAt } }.
   // За ними виводиться статус власних повідомлень (✓ / ✓✓ / ✓✓ прочитано).
   const [receipts, setReceipts] = useState({});
@@ -164,6 +199,23 @@ export default function Home() {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [messages]);
 
+  // Закриття перегляду фото на Esc
+  useEffect(() => {
+    if (!lightboxImage) return;
+    const onKeyDown = (e) => {
+      if (e.key === 'Escape') setLightboxImage(null);
+    };
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, [lightboxImage]);
+
+  // Очищення черги вкладення при зміні активного чату
+  useEffect(() => {
+    setStagedAttachment(null);
+    setUploadError(null);
+    if (fileInputRef.current) fileInputRef.current.value = '';
+  }, [activeChat?.id]);
+
   // Зливає присутність із REST-відповідей у live-мапу.
   // Потрібно після перепідключення: сервер міг перезапуститися, і в мапі
   // лишився б застарілий «онлайн», який уже ніколи не оновиться подією.
@@ -205,7 +257,7 @@ export default function Home() {
       setContactsCount(statsRes.contactsCount || 0);
       setMatchesCount(statsRes.matchesCount || 0);
     } catch (err) {
-      console.error('Помилка завантаження даних:', err);
+      console.error('Failed to load initial data:', err);
     }
   }, [syncPresence]);
 
@@ -313,9 +365,6 @@ export default function Home() {
         isMatch: Boolean(conv.isMatch),
       });
 
-      // Свіжий онлайн-стан на момент відкриття діалогу
-      syncPresence([conv.otherUser]);
-
       // Стартові watermark-и співрозмовника, щоб тіки були коректними до першої події
       setReceipts((prev) => ({
         ...prev,
@@ -332,7 +381,7 @@ export default function Home() {
           setMessages(res.messages || []);
         })
         .catch((err) => {
-          console.error('Помилка завантаження повідомлень:', err);
+          console.error('Failed to load messages:', err);
         })
         .finally(() => {
           setIsLoadingMessages(false);
@@ -342,7 +391,7 @@ export default function Home() {
         socketRef.current.emit('conversation:join', { conversationId: conv.id });
       }
     },
-    [stopTyping, syncPresence],
+    [stopTyping],
   );
 
   // Підключення та обробка Socket.IO
@@ -406,7 +455,7 @@ export default function Home() {
           const senderName = message.senderUsername || 'Співрозмовник';
           showBrowserNotification({
             title: `@${senderName}`,
-            body: message.body,
+            body: formatMessagePreview(message, 'Надіслано повідомлення'),
             onClick: () => {
               // Знаходимо діалог і перемикаємося на нього
               const targetConv = conversationsRef.current.find(
@@ -418,6 +467,14 @@ export default function Home() {
             },
           });
         }
+      }
+
+      // Будь-яка активність від співрозмовника свідчить, що він прямо зараз онлайн
+      if (isIncoming && message.senderId) {
+        setPresence((prev) => ({
+          ...prev,
+          [message.senderId]: { isOnline: true, lastSeenAt: null },
+        }));
       }
 
       // Якщо повідомлення належить поточному відкритому діалогу — додаємо до списку
@@ -440,6 +497,7 @@ export default function Home() {
             lastMessage: {
               id: message.id,
               body: message.body,
+              attachment: message.attachment,
               senderId: message.senderId,
               createdAt: message.createdAt,
             },
@@ -474,6 +532,15 @@ export default function Home() {
     socket.on('message:read', ({ conversationId, lastReadAt }) => {
       if (!conversationId || !lastReadAt) return;
 
+      const conv = conversationsRef.current.find((c) => c.id === conversationId);
+      const partnerId = conv?.otherUser?.id || (activeChatRef.current?.id === conversationId ? activeChatRef.current?.otherUser?.id : null);
+      if (partnerId) {
+        setPresence((prev) => ({
+          ...prev,
+          [partnerId]: { isOnline: true, lastSeenAt: null },
+        }));
+      }
+
       setReceipts((prev) => {
         const current = prev[conversationId] || {};
         const readAt = laterIso(current.lastReadAt, lastReadAt);
@@ -490,6 +557,15 @@ export default function Home() {
     // Співрозмовник отримав повідомлення на свій пристрій
     socket.on('message:delivered', ({ conversationId, lastDeliveredAt }) => {
       if (!conversationId || !lastDeliveredAt) return;
+
+      const conv = conversationsRef.current.find((c) => c.id === conversationId);
+      const partnerId = conv?.otherUser?.id || (activeChatRef.current?.id === conversationId ? activeChatRef.current?.otherUser?.id : null);
+      if (partnerId) {
+        setPresence((prev) => ({
+          ...prev,
+          [partnerId]: { isOnline: true, lastSeenAt: null },
+        }));
+      }
 
       setReceipts((prev) => {
         const current = prev[conversationId] || {};
@@ -526,6 +602,16 @@ export default function Home() {
 
     socket.on('typing', ({ conversationId, isTyping }) => {
       showPartnerTyping(conversationId, isTyping);
+      if (isTyping) {
+        const conv = conversationsRef.current.find((c) => c.id === conversationId);
+        const partnerId = conv?.otherUser?.id || (activeChatRef.current?.id === conversationId ? activeChatRef.current?.otherUser?.id : null);
+        if (partnerId) {
+          setPresence((prev) => ({
+            ...prev,
+            [partnerId]: { isOnline: true, lastSeenAt: null },
+          }));
+        }
+      }
     });
 
     socket.on('stranger:typing', ({ sessionId, isTyping }) => {
@@ -600,7 +686,7 @@ export default function Home() {
             : 'Анонім';
           showBrowserNotification({
             title: senderLabel,
-            body: message.body,
+            body: formatMessagePreview(message, 'Надіслано повідомлення'),
           });
         }
       }
@@ -674,7 +760,7 @@ export default function Home() {
           },
         ]);
       } catch (err) {
-        console.error('Помилка завантаження повідомлень після розкриття:', err);
+        console.error('Failed to load messages after match reveal:', err);
       }
 
       // Оновлюємо список діалогів і контактів у сайдбарі
@@ -811,7 +897,7 @@ export default function Home() {
           syncPresence(res.users || []);
         })
         .catch((err) => {
-          console.error('Помилка пошуку:', err);
+          console.error('Search error:', err);
         })
         .finally(() => {
           setIsSearching(false);
@@ -843,7 +929,7 @@ export default function Home() {
         openDirectConversation(res.conversation);
       }
     } catch (err) {
-      console.error('Не вдалося створити діалог:', err);
+      console.error('Failed to create conversation:', err);
     } finally {
       setSearchQuery('');
       setSearchResults([]);
@@ -860,7 +946,7 @@ export default function Home() {
       );
       setContactsCount((prev) => prev + 1);
     } catch (err) {
-      console.error('Помилка додавання контакту:', err);
+      console.error('Failed to add contact:', err);
     }
   };
 
@@ -876,13 +962,52 @@ export default function Home() {
     }
   };
 
+  // Завантаження файлу в чергу вкладення
+  const handleFileSelect = async (e) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+
+    if (file.size > MAX_UPLOAD_BYTES) {
+      setUploadError(`Файл завеликий (${formatFileSize(file.size)}). Максимальний розмір — 100 МБ.`);
+      if (fileInputRef.current) fileInputRef.current.value = '';
+      return;
+    }
+
+    setIsUploadingAttachment(true);
+    setUploadError(null);
+
+    try {
+      const res = await api.uploadFile(file);
+      if (res?.attachment) {
+        setStagedAttachment(res.attachment);
+      }
+    } catch (err) {
+      console.error('Failed to upload file:', err);
+      setUploadError(err.message || 'Не вдалося завантажити файл');
+    } finally {
+      setIsUploadingAttachment(false);
+      if (fileInputRef.current) fileInputRef.current.value = '';
+    }
+  };
+
+  // Скасування прикріпленого файлу
+  const handleCancelAttachment = () => {
+    setStagedAttachment(null);
+    setUploadError(null);
+    if (fileInputRef.current) fileInputRef.current.value = '';
+  };
+
   // Відправка повідомлення
   const handleSendMessage = async (e) => {
     e.preventDefault();
     const text = inputText.trim();
-    if (!text || !activeChat) return;
+    const attachment = stagedAttachment;
+    if ((!text && !attachment) || !activeChat || isUploadingAttachment) return;
 
     setInputText('');
+    setStagedAttachment(null);
+    setUploadError(null);
+    if (fileInputRef.current) fileInputRef.current.value = '';
     stopTyping();
 
     if (activeChat.type === 'stranger') {
@@ -890,10 +1015,10 @@ export default function Home() {
       if (socketRef.current?.connected) {
         socketRef.current.emit(
           'stranger:message',
-          { sessionId, body: text },
+          { sessionId, body: text, attachment },
           (res) => {
             if (!res?.ok) {
-              console.error('Помилка відправки повідомлення незнайомцю:', res?.error);
+              console.error('Failed to send stranger message:', res?.error);
             } else if (res?.message) {
               setMessages((prev) => {
                 if (prev.some((m) => m.id === res.message.id)) return prev;
@@ -910,21 +1035,21 @@ export default function Home() {
     if (socketRef.current?.connected) {
       socketRef.current.emit(
         'message:send',
-        { conversationId: activeChat.id, body: text },
+        { conversationId: activeChat.id, body: text, attachment },
         (res) => {
           if (!res?.ok) {
-            console.error('Помилка відправки через сокет:', res?.error);
+            console.error('Failed to send message via socket:', res?.error);
             // Фолбек на REST у разі помилки сокета
-            api.sendMessage(activeChat.id, text).catch(console.error);
+            api.sendMessage(activeChat.id, text, attachment).catch(console.error);
           }
         },
       );
     } else {
       // Фолбек на REST, якщо сокет тимчасово від'єднано
       try {
-        await api.sendMessage(activeChat.id, text);
+        await api.sendMessage(activeChat.id, text, attachment);
       } catch (err) {
-        console.error('Помилка відправки через REST:', err);
+        console.error('Failed to send message via REST:', err);
       }
     }
   };
@@ -955,7 +1080,7 @@ export default function Home() {
     if (socketRef.current?.connected) {
       socketRef.current.emit('stranger:search', (res) => {
         if (!res?.ok) {
-          console.error('Помилка початку пошуку:', res?.error);
+          console.error('Failed to start stranger search:', res?.error);
         }
       });
     }
@@ -995,7 +1120,7 @@ export default function Home() {
     if (socketRef.current?.connected) {
       socketRef.current.emit('stranger:next', (res) => {
         if (!res?.ok) {
-          console.error('Помилка переходу до наступного:', res?.error);
+          console.error('Failed to switch to next stranger:', res?.error);
         }
       });
     }
@@ -1021,7 +1146,7 @@ export default function Home() {
     if (socketRef.current?.connected) {
       socketRef.current.emit('stranger:match-request', { sessionId }, (res) => {
         if (!res?.ok) {
-          console.error('Помилка запиту на контакт:', res?.error);
+          console.error('Failed to request contact match:', res?.error);
         }
       });
     }
@@ -1063,7 +1188,9 @@ export default function Home() {
   const filteredConversations = cleanSearch
     ? conversations.filter((c) => {
         const usernameMatch = c.otherUser?.username?.toLowerCase().includes(cleanSearch);
-        const lastMsgMatch = c.lastMessage?.body?.toLowerCase().includes(trimmedSearch.toLowerCase());
+        const lastMsgMatch =
+          c.lastMessage?.body?.toLowerCase().includes(trimmedSearch.toLowerCase()) ||
+          c.lastMessage?.attachment?.name?.toLowerCase().includes(trimmedSearch.toLowerCase());
         return usernameMatch || lastMsgMatch;
       })
     : conversations;
@@ -1168,7 +1295,7 @@ export default function Home() {
                           </div>
                           <div className="chat-row-line2">
                             <span className="chat-row-preview">
-                              {conv.lastMessage?.body || 'Діалог створено'}
+                              {formatMessagePreview(conv.lastMessage, 'Діалог створено')}
                             </span>
                           </div>
                         </div>
@@ -1284,7 +1411,7 @@ export default function Home() {
                         </div>
                         <div className="chat-row-line2">
                           <span className="chat-row-preview">
-                            {conv.lastMessage?.body || 'Немає повідомлень'}
+                            {formatMessagePreview(conv.lastMessage, 'Немає повідомлень')}
                           </span>
                         </div>
                       </div>
@@ -1458,7 +1585,64 @@ export default function Home() {
                                 {msg.senderAnonAvatar} {msg.senderAnonName}
                               </div>
                             )}
-                            <div className="message-text">{msg.body}</div>
+                            {msg.attachment && (
+                              <div className="message-attachment">
+                                {msg.attachment.type === 'image' ? (
+                                  <div
+                                    className="attachment-image-wrap"
+                                    onClick={() => setLightboxImage(msg.attachment.url)}
+                                    title="Натисніть для перегляду"
+                                  >
+                                    <img
+                                      src={msg.attachment.url}
+                                      alt={msg.attachment.name || 'Фото'}
+                                      className="attachment-image-thumb"
+                                      loading="lazy"
+                                    />
+                                  </div>
+                                ) : msg.attachment.type === 'video' ? (
+                                  <div className="attachment-video-wrap">
+                                    <video
+                                      controls
+                                      preload="metadata"
+                                      className="attachment-video-player"
+                                      src={msg.attachment.url}
+                                    />
+                                  </div>
+                                ) : (
+                                  <a
+                                    href={`/api/uploads/download/${msg.attachment.url.split('/').pop()}?name=${encodeURIComponent(msg.attachment.name || 'file')}`}
+                                    className="attachment-file-card"
+                                    download={msg.attachment.name || 'file'}
+                                    target="_blank"
+                                    rel="noopener noreferrer"
+                                    title="Завантажити файл"
+                                  >
+                                    <div className="attachment-file-icon">
+                                      {msg.attachment.type === 'audio'
+                                        ? '🎵'
+                                        : msg.attachment.type === 'video'
+                                          ? '🎥'
+                                          : '📄'}
+                                    </div>
+                                    <div className="attachment-file-info">
+                                      <span className="attachment-file-name" title={msg.attachment.name}>
+                                        {msg.attachment.name || 'Файл'}
+                                      </span>
+                                      <span className="attachment-file-size">
+                                        {formatFileSize(msg.attachment.size)}
+                                      </span>
+                                    </div>
+                                    <div className="attachment-file-download-btn" aria-label="Завантажити">
+                                      ⬇
+                                    </div>
+                                  </a>
+                                )}
+                              </div>
+                            )}
+                            {msg.body && msg.body.trim() && (
+                              <div className="message-text">{msg.body}</div>
+                            )}
                             <div className="message-meta">
                               <span className="message-time">
                                 {formatTimestamp(msg.createdAt)}
@@ -1494,28 +1678,108 @@ export default function Home() {
                     </button>
                   </div>
                 ) : (
-                  <form className="chat-input-bar" onSubmit={handleSendMessage}>
-                    <button type="button" className="attach-btn" title="Прикріпити медіа">
-                      📎
-                    </button>
-                    <input
-                      type="text"
-                      placeholder="Напишіть повідомлення..."
-                      value={inputText}
-                      onChange={handleInputChange}
-                      autoFocus
-                    />
-                    <button
-                      type="submit"
-                      className="send-btn"
-                      disabled={!inputText.trim()}
-                      title="Надіслати"
-                    >
-                      <svg viewBox="0 0 24 24" fill="currentColor" width="20" height="20">
-                        <path d="M2.01 21L23 12 2.01 3 2 10l15 2-15 2z" />
-                      </svg>
-                    </button>
-                  </form>
+                  <>
+                    {/* Черга прикріпленого файлу / статус завантаження */}
+                    {(stagedAttachment || isUploadingAttachment || uploadError) && (
+                      <div className="attachment-staging-bar">
+                        {isUploadingAttachment && (
+                          <div className="staging-loading">
+                            <span className="staging-spinner">⏳</span>
+                            <span>Завантаження вкладення...</span>
+                          </div>
+                        )}
+                        {uploadError && (
+                          <div className="staging-error">
+                            <span>⚠️ {uploadError}</span>
+                            <button
+                              type="button"
+                              className="staging-clear-btn"
+                              onClick={handleCancelAttachment}
+                              title="Закрити"
+                            >
+                              ✕
+                            </button>
+                          </div>
+                        )}
+                        {stagedAttachment && !isUploadingAttachment && (
+                          <div className="staging-preview">
+                            {stagedAttachment.type === 'image' ? (
+                              <div className="staging-thumb-wrap">
+                                <img
+                                  src={stagedAttachment.url}
+                                  alt={stagedAttachment.name}
+                                  className="staging-thumb"
+                                />
+                              </div>
+                            ) : (
+                              <div className="staging-icon">
+                                {stagedAttachment.type === 'audio'
+                                  ? '🎵'
+                                  : stagedAttachment.type === 'video'
+                                    ? '🎥'
+                                    : '📄'}
+                              </div>
+                            )}
+                            <div className="staging-info">
+                              <span className="staging-name" title={stagedAttachment.name}>
+                                {stagedAttachment.name}
+                              </span>
+                              <span className="staging-size">
+                                {formatFileSize(stagedAttachment.size)}
+                              </span>
+                            </div>
+                            <button
+                              type="button"
+                              className="staging-remove-btn"
+                              onClick={handleCancelAttachment}
+                              title="Видалити вкладення"
+                              aria-label="Видалити вкладення"
+                            >
+                              ✕
+                            </button>
+                          </div>
+                        )}
+                      </div>
+                    )}
+                    <form className="chat-input-bar" onSubmit={handleSendMessage}>
+                      <input
+                        ref={fileInputRef}
+                        type="file"
+                        style={{ display: 'none' }}
+                        onChange={handleFileSelect}
+                      />
+                      <button
+                        type="button"
+                        className="attach-btn"
+                        title="Прикріпити медіа або файл"
+                        onClick={() => fileInputRef.current?.click()}
+                        disabled={isUploadingAttachment}
+                      >
+                        📎
+                      </button>
+                      <input
+                        type="text"
+                        placeholder={
+                          stagedAttachment
+                            ? 'Додайте підпис або надішліть...'
+                            : 'Напишіть повідомлення...'
+                        }
+                        value={inputText}
+                        onChange={handleInputChange}
+                        autoFocus
+                      />
+                      <button
+                        type="submit"
+                        className="send-btn"
+                        disabled={(!inputText.trim() && !stagedAttachment) || isUploadingAttachment}
+                        title="Надіслати"
+                      >
+                        <svg viewBox="0 0 24 24" fill="currentColor" width="20" height="20">
+                          <path d="M2.01 21L23 12 2.01 3 2 10l15 2-15 2z" />
+                        </svg>
+                      </button>
+                    </form>
+                  </>
                 )}
               </>
             )}
@@ -1595,6 +1859,35 @@ export default function Home() {
                   Вийти з акаунту
                 </button>
               </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ПЕРЕГЛЯД ЗОБРАЖЕНЬ (LIGHTBOX) */}
+      {lightboxImage && (
+        <div className="lightbox-overlay" onClick={() => setLightboxImage(null)}>
+          <div className="lightbox-content" onClick={(e) => e.stopPropagation()}>
+            <button
+              type="button"
+              className="lightbox-close-btn"
+              onClick={() => setLightboxImage(null)}
+              title="Закрити (Esc)"
+              aria-label="Закрити"
+            >
+              ✕
+            </button>
+            <img src={lightboxImage} alt="Перегляд фото" className="lightbox-img" />
+            <div className="lightbox-actions">
+              <a
+                href={lightboxImage}
+                download
+                target="_blank"
+                rel="noopener noreferrer"
+                className="lightbox-download-link"
+              >
+                ⬇ Завантажити оригінал
+              </a>
             </div>
           </div>
         </div>

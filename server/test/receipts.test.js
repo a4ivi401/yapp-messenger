@@ -16,7 +16,7 @@ test('conversations.js: watermark-и «доставлено / прочитано
     await query('SELECT 1');
     dbAvailable = true;
   } catch (err) {
-    console.warn('PostgreSQL недоступний, тести квитанцій будуть пропущені:', err.message);
+    console.warn('PostgreSQL is unavailable, skipping receipts tests:', err.message);
   }
 
   if (!dbAvailable) {

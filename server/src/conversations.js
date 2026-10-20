@@ -115,6 +115,15 @@ function formatConversationRow(row) {
           body: row.last_message_body,
           senderId: row.last_message_sender_id,
           createdAt: row.last_message_created_at,
+          attachment: row.last_message_attachment_url
+            ? {
+                url: row.last_message_attachment_url,
+                type: row.last_message_attachment_type,
+                name: row.last_message_attachment_name,
+                size: row.last_message_attachment_size,
+                mime: row.last_message_attachment_mime,
+              }
+            : null,
         }
       : null,
   };
@@ -140,7 +149,12 @@ export async function getConversationForUser(conversationId, userId) {
        lm.id            AS last_message_id,
        lm.body          AS last_message_body,
        lm.sender_id     AS last_message_sender_id,
-       lm.created_at    AS last_message_created_at
+       lm.created_at    AS last_message_created_at,
+       lm.attachment_url  AS last_message_attachment_url,
+       lm.attachment_type AS last_message_attachment_type,
+       lm.attachment_name AS last_message_attachment_name,
+       lm.attachment_size AS last_message_attachment_size,
+       lm.attachment_mime AS last_message_attachment_mime
      FROM conversations c
      JOIN conversation_participants my_p
        ON my_p.conversation_id = c.id AND my_p.user_id = $2
@@ -151,7 +165,9 @@ export async function getConversationForUser(conversationId, userId) {
      LEFT JOIN matches m
        ON m.conversation_id = c.id
      LEFT JOIN LATERAL (
-       SELECT msg.id, msg.body, msg.sender_id, msg.created_at
+       SELECT msg.id, msg.body, msg.sender_id, msg.created_at,
+              msg.attachment_url, msg.attachment_type, msg.attachment_name,
+              msg.attachment_size, msg.attachment_mime
          FROM messages msg
         WHERE msg.conversation_id = c.id
         ORDER BY msg.created_at DESC, msg.id DESC
@@ -184,7 +200,12 @@ export async function listConversationsForUser(userId) {
        lm.id            AS last_message_id,
        lm.body          AS last_message_body,
        lm.sender_id     AS last_message_sender_id,
-       lm.created_at    AS last_message_created_at
+       lm.created_at    AS last_message_created_at,
+       lm.attachment_url  AS last_message_attachment_url,
+       lm.attachment_type AS last_message_attachment_type,
+       lm.attachment_name AS last_message_attachment_name,
+       lm.attachment_size AS last_message_attachment_size,
+       lm.attachment_mime AS last_message_attachment_mime
      FROM conversations c
      JOIN conversation_participants my_p
        ON my_p.conversation_id = c.id AND my_p.user_id = $1
@@ -195,7 +216,9 @@ export async function listConversationsForUser(userId) {
      LEFT JOIN matches m
        ON m.conversation_id = c.id
      LEFT JOIN LATERAL (
-       SELECT msg.id, msg.body, msg.sender_id, msg.created_at
+       SELECT msg.id, msg.body, msg.sender_id, msg.created_at,
+              msg.attachment_url, msg.attachment_type, msg.attachment_name,
+              msg.attachment_size, msg.attachment_mime
          FROM messages msg
         WHERE msg.conversation_id = c.id
         ORDER BY msg.created_at DESC, msg.id DESC
@@ -214,8 +237,17 @@ function formatMessageRow(row) {
     conversationId: row.conversation_id,
     senderId: row.sender_id,
     senderUsername: row.sender_username ?? null,
-    body: row.body,
+    body: row.body || '',
     createdAt: row.created_at,
+    attachment: row.attachment_url
+      ? {
+          url: row.attachment_url,
+          type: row.attachment_type,
+          name: row.attachment_name,
+          size: row.attachment_size,
+          mime: row.attachment_mime,
+        }
+      : null,
   };
 }
 
@@ -241,7 +273,10 @@ export async function listMessages(conversationId, { limit = 50, before = null }
     const cursorCreatedAt = cursorRows[0].created_at;
 
     const res = await query(
-      `SELECT m.id, m.conversation_id, m.sender_id, m.body, m.created_at, u.username AS sender_username
+      `SELECT m.id, m.conversation_id, m.sender_id, m.body, m.created_at,
+              m.attachment_url, m.attachment_type, m.attachment_name,
+              m.attachment_size, m.attachment_mime,
+              u.username AS sender_username
          FROM messages m
          JOIN users u ON u.id = m.sender_id
         WHERE m.conversation_id = $1
@@ -253,7 +288,10 @@ export async function listMessages(conversationId, { limit = 50, before = null }
     rows = res.rows;
   } else {
     const res = await query(
-      `SELECT m.id, m.conversation_id, m.sender_id, m.body, m.created_at, u.username AS sender_username
+      `SELECT m.id, m.conversation_id, m.sender_id, m.body, m.created_at,
+              m.attachment_url, m.attachment_type, m.attachment_name,
+              m.attachment_size, m.attachment_mime,
+              u.username AS sender_username
          FROM messages m
          JOIN users u ON u.id = m.sender_id
         WHERE m.conversation_id = $1
@@ -279,17 +317,42 @@ export async function listMessages(conversationId, { limit = 50, before = null }
 /**
  * Створює нове повідомлення в діалозі.
  */
-export async function createMessage(conversationId, senderId, body) {
+export async function createMessage(conversationId, senderId, body, attachment = null) {
+  const attachmentUrl = attachment?.url || null;
+  const attachmentType = attachment?.type || null;
+  const attachmentName = attachment?.name || null;
+  const attachmentSize =
+    attachment?.size !== undefined && attachment?.size !== null
+      ? Number(attachment.size)
+      : null;
+  const attachmentMime = attachment?.mime || null;
+
   const { rows } = await query(
     `WITH inserted AS (
-       INSERT INTO messages (conversation_id, sender_id, body)
-       VALUES ($1, $2, $3)
-       RETURNING id, conversation_id, sender_id, body, created_at
+       INSERT INTO messages (
+         conversation_id, sender_id, body,
+         attachment_url, attachment_type, attachment_name, attachment_size, attachment_mime
+       )
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+       RETURNING id, conversation_id, sender_id, body,
+                 attachment_url, attachment_type, attachment_name, attachment_size, attachment_mime,
+                 created_at
      )
-     SELECT ins.id, ins.conversation_id, ins.sender_id, ins.body, ins.created_at, u.username AS sender_username
+     SELECT ins.id, ins.conversation_id, ins.sender_id, ins.body,
+            ins.attachment_url, ins.attachment_type, ins.attachment_name, ins.attachment_size, ins.attachment_mime,
+            ins.created_at, u.username AS sender_username
        FROM inserted ins
        JOIN users u ON u.id = ins.sender_id`,
-    [conversationId, senderId, body],
+    [
+      conversationId,
+      senderId,
+      body || '',
+      attachmentUrl,
+      attachmentType,
+      attachmentName,
+      attachmentSize,
+      attachmentMime,
+    ],
   );
   return formatMessageRow(rows[0]);
 }

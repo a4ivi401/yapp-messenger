@@ -26,9 +26,23 @@ const createConversationSchema = z.object({
   username: z.string().trim().min(3).max(20),
 });
 
-const messageSchema = z.object({
-  body: z.string().trim().min(1).max(4000),
+const attachmentSchema = z.object({
+  url: z.string().trim().min(1).max(2048),
+  type: z.enum(['image', 'file', 'audio', 'video']),
+  name: z.string().trim().min(1).max(255),
+  size: z.number().int().nonnegative().max(100 * 1024 * 1024).optional().nullable(),
+  mime: z.string().trim().max(128).optional().nullable(),
 });
+
+const messageSchema = z
+  .object({
+    body: z.string().trim().max(4000).optional().default(''),
+    attachment: attachmentSchema.optional().nullable(),
+  })
+  .refine(
+    (data) => (data.body && data.body.length > 0) || Boolean(data.attachment),
+    { message: 'Повідомлення не може бути порожнім' },
+  );
 
 const listMessagesQuerySchema = z.object({
   limit: z.coerce.number().int().min(1).max(100).default(50),
@@ -137,7 +151,12 @@ conversationsRouter.post(
       return res.status(404).json({ error: 'Діалог не знайдено' });
     }
 
-    const message = await createMessage(req.params.id, me, parsed.data.body);
+    const message = await createMessage(
+      req.params.id,
+      me,
+      parsed.data.body,
+      parsed.data.attachment,
+    );
 
     const io = req.app.get('io');
     if (io) {

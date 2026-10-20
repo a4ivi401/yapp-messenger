@@ -54,7 +54,7 @@ Priority legend: 🟣 **core** (can't pass without it) · ⚪ **leftover** (only
 | **5** ✅ | Random stranger: in-memory matchmaking queue (FIFO), session exclusion prevention, anonymous personas, ephemeral chat & mutual match to contacts | 🟣 |
 | **6** ✅ | Matching: `matches` model (migration 004), canonical UUID pair ordering, mutual match persistence in DB, stats API, realtime `match:new`, visual "🎲 Метч" badges | 🟣 |
 | **7** ✅ | "Delivered / read" statuses + "typing…" indicator + real presence ("online" / "last seen …"): watermark model on `conversation_participants` (migration 005), `users.last_seen_at` (migration 006), `conversation:read`, `message:delivered`, `typing`, `presence:update` events; the "🎲 Match" badge was removed from the chat list and header (it will return as a separate accent) | 🟣 minimum |
-| **8** | Media: photos & files (`multer`, `uploads` volume), image previews | ⚪ |
+| **8** ✅ | Media: photos & files (`multer`, `uploads` volume), image previews, modal lightbox, secure storage & downloads | ⚪ |
 | **9** | Voice messages (MediaRecorder: record → upload → playback) | ⚪ |
 | **10** | Edit / delete messages + search across chats and contacts | ⚪ |
 | **11** | Block / report in the anonymous chat + basic rate limiting | ⚪ |
@@ -140,13 +140,16 @@ Open **http://localhost:5173**. (Kill the docker stack first if ports are taken:
 | POST | `/api/conversations` | `{ username }` — find or create direct conversation |
 | GET | `/api/conversations/:id` | conversation details (participant only) |
 | GET | `/api/conversations/:id/messages` | message history (includes `senderUsername`); pagination `?limit=50&before=<id>` |
-| POST | `/api/conversations/:id/messages` | `{ body }` — send a message |
+| POST | `/api/conversations/:id/messages` | `{ body?, attachment? }` — send a message (text, attachment, or both) |
 | GET | `/api/contacts` | list of saved contacts and total count `{ contacts, count }` |
 | POST | `/api/contacts` | `{ username }` or `{ userId }` — add user to contacts (idempotent, self-contact validation) |
 | DELETE | `/api/contacts/:userId` | remove user from contacts by UUID |
 | GET | `/api/matches` | user's mutual match history `{ matches }` |
 | GET | `/api/matches/stats` | aggregated user stats `{ matchesCount, contactsCount }` |
 | GET | `/api/users/search?q=...` | global user search by username substring with `isContact` flag |
+| POST | `/api/uploads` | `multipart/form-data` with `file` field — upload photo or file (up to 20 MB); returns `{ attachment: { url, type, name, size, mime } }` |
+| GET | `/api/uploads/files/:filename` | direct media file delivery with `Cache-Control: immutable` and `X-Content-Type-Options: nosniff` |
+| GET | `/api/uploads/download/:filename?name=...` | secure file download preserving original filename (`Content-Disposition: attachment`) |
 
 ### Message statuses
 
@@ -178,14 +181,14 @@ Upon connection, each authenticated user automatically joins their own private r
 |---|---|---|---|
 | `conversation:join` | `{ conversationId }` | `{ ok: true }` or `{ ok: false, error }` | Join room `conversation:<id>` (participants only) |
 | `conversation:leave` | `{ conversationId }` | `{ ok: true }` | Leave conversation room |
-| `message:send` | `{ conversationId, body }` | `{ ok: true, message }` or `{ ok: false, error }` | Persist message to DB and broadcast to conversation room & participant private rooms |
+| `message:send` | `{ conversationId, body?, attachment? }` | `{ ok: true, message }` or `{ ok: false, error }` | Persist message to DB and broadcast to conversation room & participant private rooms (supports text, media attachment, or both) |
 | `conversation:read` | `{ conversationId }` | `{ ok: true }` | Mark all incoming messages of the conversation as read (lifts the watermark) and notify the partner via `message:read`. Repeating with no new incoming messages is a no-op with no broadcast |
 | `message:delivered` | `{ messageId }` | `{ ok: true }` | Delivery acknowledgement from the recipient; the sender receives `message:delivered` |
 | `typing` | `{ conversationId, isTyping }` | `{ ok: true }` or `{ ok: false, error }` | "Typing…" indicator in a direct chat. The server only relays the event (stateless); starts are throttled to 500 ms per recipient |
 | `stranger:typing` | `{ sessionId, isTyping }` | `{ ok: true }` or `{ ok: false, error }` | Same for the anonymous chat |
 | `stranger:search` | — | `{ ok: true, status }` | Start searching for a random stranger or enter the FIFO queue |
 | `stranger:cancel` | — | `{ ok: true }` | Cancel search and remove from queue |
-| `stranger:message` | `{ sessionId, body }` | `{ ok: true, message }` | Send an ephemeral message to the stranger (up to 4000 characters) |
+| `stranger:message` | `{ sessionId, body?, attachment? }` | `{ ok: true, message }` | Send an ephemeral message to the stranger (text up to 4000 characters, media attachment, or both) |
 | `stranger:next` | — | `{ ok: true, status }` | Skip current stranger («🎲 Next»): record session exclusion to prevent re-matching and search for a new partner |
 | `stranger:leave` | — | `{ ok: true }` | Leave stranger chat and mark mutual exclusion in session |
 | `stranger:match-request` | `{ sessionId }` | `{ ok: true, mutual }` | Send contact request («🤝 Add to contacts»). When mutual, saves messages to DB and reveals identities |
@@ -226,4 +229,5 @@ yapp-messenger/
 - Passwords — `crypto.scrypt` with a random salt (`salt:hash`), verified with `timingSafeEqual`.
 - Sessions — random token stored in DB, carried only in an httpOnly cookie.
 - Parameterized SQL everywhere; input validated with zod.
+- File uploads — 20 MB size limit, dangerous/executable extension blocking (.exe, .bat, .sh, .php, etc.), UUID storage filename validation preventing path traversal, isolated `uploads` volume.
 - Planned: HTTPS on deployment.

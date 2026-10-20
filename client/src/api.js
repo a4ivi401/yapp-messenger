@@ -1,10 +1,21 @@
 async function request(path, options = {}) {
+  const isFormData = typeof FormData !== 'undefined' && options.body instanceof FormData;
+  const headers = { ...options.headers };
+  if (!isFormData && !headers['Content-Type']) {
+    headers['Content-Type'] = 'application/json';
+  }
   const res = await fetch(path, {
-    headers: { 'Content-Type': 'application/json' },
     ...options,
+    headers,
   });
   const body = await res.json().catch(() => ({}));
-  if (!res.ok) throw new Error(body.error || 'Помилка запиту');
+  if (!res.ok) {
+    if (res.status === 413) {
+      throw new Error('Файл завеликий (перевищено ліміт 100 МБ)');
+    }
+    const message = body?.error || (res.status >= 500 ? 'Помилка сервера' : 'Помилка запиту');
+    throw new Error(message);
+  }
   return body;
 }
 
@@ -28,11 +39,26 @@ export const api = {
     const qs = params.toString();
     return request(`/api/conversations/${id}/messages${qs ? `?${qs}` : ''}`);
   },
-  sendMessage: (id, body) =>
-    request(`/api/conversations/${id}/messages`, {
+  sendMessage: (id, body, attachment = null) => {
+    const payload =
+      typeof body === 'object' && body !== null && !Array.isArray(body)
+        ? body
+        : { body: body || '', attachment };
+    return request(`/api/conversations/${id}/messages`, {
       method: 'POST',
-      body: JSON.stringify({ body }),
-    }),
+      body: JSON.stringify(payload),
+    });
+  },
+
+  // Медіа та завантаження файлів
+  uploadFile: (file) => {
+    const formData = new FormData();
+    formData.append('file', file);
+    return request('/api/uploads', {
+      method: 'POST',
+      body: formData,
+    });
+  },
 
   // Користувачі та пошук
   searchUsers: (q) => request(`/api/users/search?q=${encodeURIComponent(q)}`),

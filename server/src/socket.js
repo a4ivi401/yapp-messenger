@@ -18,6 +18,7 @@ import {
   isOnline,
   touchLastSeen,
   broadcastPresence,
+  getPresenceAudience,
 } from './presence.js';
 import {
   findOrEnqueue,
@@ -45,15 +46,35 @@ const joinLeaveSchema = z.object({
   conversationId: z.string().uuid(),
 });
 
-const sendMessageSchema = z.object({
-  conversationId: z.string().uuid(),
-  body: z.string().trim().min(1).max(4000),
+const attachmentSchema = z.object({
+  url: z.string().trim().min(1).max(2048),
+  type: z.enum(['image', 'file', 'audio', 'video']),
+  name: z.string().trim().min(1).max(255),
+  size: z.number().int().nonnegative().max(100 * 1024 * 1024).optional().nullable(),
+  mime: z.string().trim().max(128).optional().nullable(),
 });
 
-const strangerMsgSchema = z.object({
-  sessionId: z.string().uuid(),
-  body: z.string().trim().min(1).max(4000),
-});
+const sendMessageSchema = z
+  .object({
+    conversationId: z.string().uuid(),
+    body: z.string().trim().max(4000).optional().default(''),
+    attachment: attachmentSchema.optional().nullable(),
+  })
+  .refine(
+    (data) => (data.body && data.body.length > 0) || Boolean(data.attachment),
+    { message: 'Повідомлення не може бути порожнім' },
+  );
+
+const strangerMsgSchema = z
+  .object({
+    sessionId: z.string().uuid(),
+    body: z.string().trim().max(4000).optional().default(''),
+    attachment: attachmentSchema.optional().nullable(),
+  })
+  .refine(
+    (data) => (data.body && data.body.length > 0) || Boolean(data.attachment),
+    { message: 'Повідомлення не може бути порожнім' },
+  );
 
 const strangerSessionSchema = z.object({
   sessionId: z.string().uuid(),
@@ -125,6 +146,22 @@ export function setupSocket(io) {
         () => isOnline(socket.user.id),
       );
     }
+
+    // Передаємо щойно підключеному сокету актуальний онлайн-стан тих його
+    // співрозмовників та контактів, які вже в мережі
+    getPresenceAudience(socket.user.id)
+      .then((audience) => {
+        for (const partnerId of audience) {
+          if (isOnline(partnerId)) {
+            socket.emit('presence:update', {
+              userId: partnerId,
+              isOnline: true,
+              lastSeenAt: null,
+            });
+          }
+        }
+      })
+      .catch((err) => console.error('presence init error:', err));
 
     // Якщо у користувача вже є активна анонімна сесія — приєднуємо сокет до кімнати сесії
     const activeStranger = getSessionByUserId(socket.user.id);
@@ -202,13 +239,13 @@ export function setupSocket(io) {
           return ack?.({ ok: false, error: parsed.error.issues[0].message });
         }
 
-        const { conversationId, body } = parsed.data;
+        const { conversationId, body, attachment } = parsed.data;
         const participant = await isParticipant(conversationId, socket.user.id);
         if (!participant) {
           return ack?.({ ok: false, error: 'Діалог не знайдено' });
         }
 
-        const message = await createMessage(conversationId, socket.user.id, body);
+        const message = await createMessage(conversationId, socket.user.id, body, attachment);
 
         // Отримуємо всіх учасників для трансляції в кімнату діалогу та персональні кімнати
         const participantIds = await getConversationParticipantIds(conversationId);
@@ -398,7 +435,7 @@ export function setupSocket(io) {
           return ack?.({ ok: false, error: parsed.error.issues[0].message });
         }
 
-        const { sessionId, body } = parsed.data;
+        const { sessionId, body, attachment } = parsed.data;
         const session = getSession(sessionId);
         if (!session) {
           return ack?.({ ok: false, error: 'Сесію не знайдено або вже завершено' });
@@ -418,7 +455,8 @@ export function setupSocket(io) {
           senderAnonId: myUser.anonId,
           senderAnonName: myUser.anonName,
           senderAnonAvatar: myUser.anonAvatar,
-          body,
+          body: body || '',
+          attachment: attachment || null,
           createdAt: new Date().toISOString(),
         };
 
@@ -552,11 +590,11 @@ export function setupSocket(io) {
         // 3. Зберігаємо всі надіслані ефемерні повідомлення в таблицю messages
         if (messages && messages.length > 0) {
           for (const msg of messages) {
-            if (msg.senderId && msg.body) {
+            if (msg.senderId && ((msg.body && msg.body.trim().length > 0) || msg.attachment)) {
               try {
-                await createMessage(conversationId, msg.senderId, msg.body);
+                await createMessage(conversationId, msg.senderId, msg.body || '', msg.attachment || null);
               } catch (mErr) {
-                console.error('Помилка міграції повідомлення з ефемерного чату:', mErr);
+                console.error('Error migrating message from ephemeral chat:', mErr);
               }
             }
           }

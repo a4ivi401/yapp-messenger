@@ -9,7 +9,7 @@ export async function requestNotificationPermission() {
     try {
       return await Notification.requestPermission();
     } catch (err) {
-      console.debug('Помилка запиту дозволу на сповіщення:', err);
+      console.debug('Notification permission request error:', err);
       return 'denied';
     }
   }
@@ -54,7 +54,7 @@ export function showBrowserNotification({ title, body, icon = '/vite.svg', onCli
 
     return notification;
   } catch (err) {
-    console.debug('Не вдалося створити сповіщення:', err);
+    console.debug('Failed to create notification:', err);
     return null;
   }
 }

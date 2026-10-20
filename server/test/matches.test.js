@@ -16,7 +16,7 @@ test('matches.js database integration & validation tests', async (t) => {
     await query('SELECT 1');
     dbAvailable = true;
   } catch (err) {
-    console.warn('PostgreSQL недоступний, тести бази даних будуть пропущені:', err.message);
+    console.warn('PostgreSQL is unavailable, skipping database tests:', err.message);
   }
 
   await t.test('validation: throws if pair is invalid', async () => {

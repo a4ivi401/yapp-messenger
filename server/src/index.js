@@ -9,6 +9,7 @@ import { conversationsRouter } from './routes/conversations.js';
 import { contactsRouter } from './routes/contacts.js';
 import { matchesRouter } from './routes/matches.js';
 import { usersRouter } from './routes/users.js';
+import { uploadsRouter } from './routes/uploads.js';
 import { attachUser } from './middleware/auth.js';
 import { pool } from './db.js';
 import { setupSocket } from './socket.js';
@@ -33,6 +34,7 @@ app.use('/api/conversations', conversationsRouter);
 app.use('/api/contacts', contactsRouter);
 app.use('/api/matches', matchesRouter);
 app.use('/api/users', usersRouter);
+app.use('/api/uploads', uploadsRouter);
 
 // У проді цей же сервер віддає зібраний фронтенд (client/dist)
 const clientDist = path.resolve(import.meta.dirname, '../../client/dist');
@@ -69,7 +71,7 @@ lastSeenTimer.unref();
 // Коректне завершення: фіксуємо останню активність перед зупинкою контейнера.
 // io.close() закриває і HTTP-сервер, тому окремий server.close() не потрібен.
 async function shutdown(signal) {
-  console.log(`${signal}: завершуємо роботу`);
+  console.log(`${signal}: shutting down`);
   clearInterval(lastSeenTimer);
   try {
     await flushLastSeen();
