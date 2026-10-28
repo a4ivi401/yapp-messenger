@@ -41,6 +41,30 @@ export function sanitizeExtension(originalName) {
   return /^\.[a-z0-9]+$/i.test(ext) ? ext : '';
 }
 
+// Розширення за mime-базою: рятівний шлях для файлів, чия оригінальна назва
+// надійшла без розширення (наприклад, голосове з ім'ям «webm»)
+const EXTENSION_BY_MIME_BASE = [
+  ['audio/webm', '.webm'],
+  ['audio/ogg', '.ogg'],
+  ['audio/mp4', '.m4a'],
+  ['audio/mpeg', '.mp3'],
+  ['audio/wav', '.wav'],
+  ['audio/aac', '.aac'],
+  ['audio/flac', '.flac'],
+  ['image/jpeg', '.jpg'],
+  ['image/png', '.png'],
+  ['image/webp', '.webp'],
+  ['image/gif', '.gif'],
+  ['video/mp4', '.mp4'],
+  ['video/webm', '.webm'],
+];
+
+export function extensionForMime(mimeType) {
+  const base = typeof mimeType === 'string' ? mimeType.split(';')[0].trim().toLowerCase() : '';
+  const match = EXTENSION_BY_MIME_BASE.find(([key]) => base.startsWith(key));
+  return match ? match[1] : '';
+}
+
 export function detectCategory(mimeType, ext) {
   if (mimeType && mimeType.startsWith('image/')) {
     return 'image';
@@ -65,7 +89,8 @@ const storage = multer.diskStorage({
     cb(null, UPLOADS_DIR);
   },
   filename: (_req, file, cb) => {
-    const ext = sanitizeExtension(file.originalname);
+    // Розширення з імені; якщо його там немає — виводимо з mime (голосові та медіа)
+    const ext = sanitizeExtension(file.originalname) || extensionForMime(file.mimetype);
     const uniqueId = crypto.randomUUID();
     cb(null, `${uniqueId}${ext}`);
   },
@@ -92,9 +117,26 @@ export const upload = multer({
 
 export const uploadsRouter = Router();
 
-// Безпечний валідатор імені збереженого файлу (захист від path traversal)
+// Безпечний валідатор імені збереженого файлу (захист від path traversal).
+// Розширення тепер необов'язкове: старі голосові могли зберегтися без нього —
+// набір допустимих символів і так виключає «..» і шляхи.
 export function isValidStoredFilename(filename) {
-  return typeof filename === 'string' && /^[a-zA-Z0-9_-]+\.[a-zA-Z0-9]+$/.test(filename);
+  return typeof filename === 'string' && /^[a-zA-Z0-9_-]+(\.[a-zA-Z0-9]+)?$/.test(filename);
+}
+
+// Визначення типу за магічними байтами для файлів без розширення: інакше <audio>/<video>
+// отримає application/octet-stream і відмовиться відтворювати («resource was not suitable»)
+export function sniffContentType(buffer) {
+  if (!Buffer.isBuffer(buffer) || buffer.length < 8) return null;
+  // webm / matroska: 1A 45 DF A3
+  if (buffer[0] === 0x1a && buffer[1] === 0x45 && buffer[2] === 0xdf && buffer[3] === 0xa3) {
+    return 'audio/webm';
+  }
+  const head = buffer.subarray(0, 12).toString('latin1');
+  if (head.startsWith('OggS')) return 'audio/ogg';
+  if (head.startsWith('ID3')) return 'audio/mpeg';
+  if (head.slice(4, 8) === 'ftyp') return 'video/mp4';
+  return null;
 }
 
 // POST /api/uploads — завантаження фото або файлу
@@ -157,9 +199,28 @@ uploadsRouter.get('/files/:filename', (req, res) => {
   }
 
   res.setHeader('X-Content-Type-Options', 'nosniff');
+  // Файл із розширенням: sendFile виставить Content-Type сам (наприклад, .webm → video/webm,
+  // аудіо-доріжка в контейнері все одно відтворюється <audio>).
+  if (path.extname(filename)) {
+    // Кешуємо медіафайл довготривало: UUID файлу унікальний і незмінний
+    res.setHeader('Cache-Control', 'public, max-age=2592000, immutable');
+    return res.sendFile(resolvedPath);
+  }
+
+  // Файл без розширення (збережений до виведення розширення з mime):
+  // тип за магічними байтами, бо sendFile проставив би octet-stream
+  const fd = fs.openSync(resolvedPath, 'r');
+  const magic = Buffer.alloc(16);
+  try {
+    fs.readSync(fd, magic, 0, magic.length, 0);
+  } finally {
+    fs.closeSync(fd);
+  }
+  const sniffed = sniffContentType(magic);
+  if (sniffed) res.setHeader('Content-Type', sniffed);
   // Кешуємо медіафайл довготривало: UUID файлу унікальний і незмінний
   res.setHeader('Cache-Control', 'public, max-age=2592000, immutable');
-  res.sendFile(resolvedPath);
+  fs.createReadStream(resolvedPath).pipe(res);
 });
 
 // GET /api/uploads/download/:filename — скачування файлу з оригінальною назвою

@@ -7,6 +7,9 @@ import {
   requestNotificationPermission,
   showBrowserNotification,
 } from '../utils/notifications.js';
+import { startVoiceRecording } from '../utils/voice.js';
+import VoicePlayer from '../components/VoicePlayer.jsx';
+import VoiceRecordingBar from '../components/VoiceRecordingBar.jsx';
 
 function formatTimestamp(isoString) {
   if (!isoString) return '';
@@ -42,7 +45,7 @@ function formatMessagePreview(lastMessage, fallback = 'Немає повідом
   }
   if (lastMessage.attachment) {
     if (lastMessage.attachment.type === 'image') return '📷 Фото';
-    if (lastMessage.attachment.type === 'audio') return '🎵 Аудіо';
+    if (lastMessage.attachment.type === 'audio') return '🎤 Голосове';
     if (lastMessage.attachment.type === 'video') return '🎥 Відео';
     return `📎 ${lastMessage.attachment.name || 'Файл'}`;
   }
@@ -151,9 +154,21 @@ export default function Home() {
   const [lightboxImage, setLightboxImage] = useState(null);
   const fileInputRef = useRef(null);
 
+  // Голосовий запис: рекордер у ref — MediaStream лежить поза реакт-станом,
+  // стани лише керують UI (панель запису / надсилання / плашка помилки)
+  const [isRecording, setIsRecording] = useState(false);
+  const [isSendingVoice, setIsSendingVoice] = useState(false);
+  const [voiceError, setVoiceError] = useState(null);
+  const recorderRef = useRef(null);
+
   // Watermark-и співрозмовника по діалогах: { [conversationId]: { lastReadAt, lastDeliveredAt } }.
   // За ними виводиться статус власних повідомлень (✓ / ✓✓ / ✓✓ прочитано).
   const [receipts, setReceipts] = useState({});
+
+  // Лічильники непрочитаних для сайдбара: { [conversationId]: count }.
+  // Сесійні (скидаються на перезавантаженні): рахуємо лише вхідні, що прийшли,
+  // поки діалог не відкритий або вкладка згорнута; відкриття чату обнуляє лічильник.
+  const [unreadCounts, setUnreadCounts] = useState({});
 
   // Співрозмовник у активній розмові друкує
   const [partnerTyping, setPartnerTyping] = useState(false);
@@ -183,6 +198,9 @@ export default function Home() {
   const strangerSessionRef = useRef(strangerSession);
   strangerSessionRef.current = strangerSession;
 
+  // Прапорець «першого» connect: лише на реконнектах оновлюємо список з REST
+  const hasConnectedRef = useRef(false);
+
   const conversationsRef = useRef(conversations);
   conversationsRef.current = conversations;
 
@@ -208,6 +226,14 @@ export default function Home() {
     window.addEventListener('keydown', onKeyDown);
     return () => window.removeEventListener('keydown', onKeyDown);
   }, [lightboxImage]);
+
+  // Розмонтування сторінки під час запису: мікрофон слід звільнити обов'язково
+  useEffect(
+    () => () => {
+      recorderRef.current?.cancel();
+    },
+    [],
+  );
 
   // Очищення черги вкладення при зміні активного чату
   useEffect(() => {
@@ -253,6 +279,10 @@ export default function Home() {
       ]);
       const loaded = convsRes.conversations || [];
       setConversations(loaded);
+      // Персистентні непрочитані: початкові значення з БД (watermark «прочитано»)
+      setUnreadCounts(
+        Object.fromEntries(loaded.map((conv) => [conv.id, conv.unreadCount || 0])),
+      );
       syncPresence(loaded.map((conv) => conv.otherUser));
       setContactsCount(statsRes.contactsCount || 0);
       setMatchesCount(statsRes.matchesCount || 0);
@@ -365,6 +395,11 @@ export default function Home() {
         isMatch: Boolean(conv.isMatch),
       });
 
+      // Чат відкритий — непрочитані в ньому переглянуті
+      setUnreadCounts((prev) =>
+        prev[conv.id] ? { ...prev, [conv.id]: 0 } : prev,
+      );
+
       // Стартові watermark-и співрозмовника, щоб тіки були коректними до першої події
       setReceipts((prev) => ({
         ...prev,
@@ -408,6 +443,21 @@ export default function Home() {
       if (chat?.type !== 'direct') return;
 
       socket.emit('conversation:join', { conversationId: chat.id });
+
+      // Перепідключення (не перший connect): за час офлайну в інші діалоги могли
+      // прийти повідомлення, які сокет не повторює. Оновлюємо список з REST —
+      // серверні лічильники непрочитаних дружать стан із БД.
+      const isFirstConnect = hasConnectedRef.current;
+      hasConnectedRef.current = true;
+      if (!isFirstConnect) {
+        loadInitialData().then(() => {
+          // Активний чат позначається прочитаним поруч — бейдж не повинен блимати
+          setUnreadCounts((prev) =>
+            prev[chat.id] ? { ...prev, [chat.id]: 0 } : prev,
+          );
+        });
+      }
+
       // Поки сокет був відключений, співрозмовник міг прочитати діалог —
       // тому перечитуємо watermark-и з REST, а не покладаємось лише на події
       api
@@ -466,6 +516,15 @@ export default function Home() {
               }
             },
           });
+        }
+
+        // Бейдж непрочитаних у списку чатів: той самий критерій, що й для сповіщення —
+        // діалог не відкритий або вкладка згорнута
+        if (isUnfocused) {
+          setUnreadCounts((prev) => ({
+            ...prev,
+            [message.conversationId]: (prev[message.conversationId] || 0) + 1,
+          }));
         }
       }
 
@@ -830,9 +889,22 @@ export default function Home() {
 
     markActiveChatRead();
 
-    const onFocus = () => markActiveChatRead();
+    // Повернення до відкритого чату: непрочитані в ньому вже переглянуті
+    const clearActiveUnread = () => {
+      setUnreadCounts((prev) =>
+        prev[activeChat.id] ? { ...prev, [activeChat.id]: 0 } : prev,
+      );
+    };
+
+    const onFocus = () => {
+      markActiveChatRead();
+      clearActiveUnread();
+    };
     const onVisibilityChange = () => {
-      if (!document.hidden) markActiveChatRead();
+      if (!document.hidden) {
+        markActiveChatRead();
+        clearActiveUnread();
+      }
     };
 
     window.addEventListener('focus', onFocus);
@@ -997,17 +1069,10 @@ export default function Home() {
     if (fileInputRef.current) fileInputRef.current.value = '';
   };
 
-  // Відправка повідомлення
-  const handleSendMessage = async (e) => {
-    e.preventDefault();
-    const text = inputText.trim();
-    const attachment = stagedAttachment;
-    if ((!text && !attachment) || !activeChat || isUploadingAttachment) return;
-
-    setInputText('');
-    setStagedAttachment(null);
-    setUploadError(null);
-    if (fileInputRef.current) fileInputRef.current.value = '';
+  // Спільна відправка для тексту з вкладенням і для голосових: сокет з ack, фолбек REST.
+  // Текст може бути порожнім — сервер (Zod-схема) приймає вкладення без тіла.
+  const dispatchMessage = async (text, attachment) => {
+    if (!activeChat) return;
     stopTyping();
 
     if (activeChat.type === 'stranger') {
@@ -1051,6 +1116,85 @@ export default function Home() {
       } catch (err) {
         console.error('Failed to send message via REST:', err);
       }
+    }
+  };
+
+  // Відправка повідомлення
+  const handleSendMessage = async (e) => {
+    e.preventDefault();
+    const text = inputText.trim();
+    const attachment = stagedAttachment;
+    if ((!text && !attachment) || !activeChat || isUploadingAttachment) return;
+
+    setInputText('');
+    setStagedAttachment(null);
+    setUploadError(null);
+    if (fileInputRef.current) fileInputRef.current.value = '';
+    dispatchMessage(text, attachment);
+  };
+
+  // ============ Голосові повідомлення (день 9) ============
+
+  // Натискання на мікрофон: запит дозволу через getUserMedia. Якщо доступ раніше
+  // заборонено — нічого не записуємо, показуємо плашку; після дозволу запис
+  // стартує одразу, без другого кліка.
+  const handleMicClick = async () => {
+    if (isRecording || isSendingVoice) return;
+    try {
+      recorderRef.current = await startVoiceRecording();
+      setVoiceError(null);
+      setIsRecording(true);
+    } catch (err) {
+      console.error('Voice recording failed:', err);
+      setVoiceError(
+        err.code === 'denied'
+          ? 'Доступ до мікрофона заборонено. Дозвольте його у налаштуваннях сайту та спробуйте знову.'
+          : err.code === 'no-mic'
+            ? 'Мікрофон не знайдено.'
+            : err.code === 'unsupported'
+              ? 'Ваш браузер не підтримує запис голосу.'
+              : err.code === 'busy'
+                ? 'Мікрофон зайнятий іншою програмою.'
+                : 'Не вдалося почати запис голосового.',
+      );
+    }
+  };
+
+  const teardownRecorder = () => {
+    recorderRef.current = null;
+    setIsRecording(false);
+  };
+
+  // Скасування запису: звук викидається, мікрофон звільняється
+  const handleVoiceCancel = () => {
+    recorderRef.current?.cancel();
+    teardownRecorder();
+  };
+
+  // Зупинка запису → завантаження файлу → миттєва відправка як вкладення
+  const handleVoiceSend = async () => {
+    const recorder = recorderRef.current;
+    if (!recorder) return;
+    teardownRecorder();
+
+    const { blob, extension } = await recorder.stop();
+    if (!blob) return;
+
+    setIsSendingVoice(true);
+    setVoiceError(null);
+    try {
+      const file = new File([blob], `voice${extension || '.webm'}`, {
+        type: blob.type,
+      });
+      const res = await api.uploadFile(file);
+      if (res?.attachment) {
+        dispatchMessage('', res.attachment);
+      }
+    } catch (err) {
+      console.error('Failed to send voice message:', err);
+      setVoiceError(err.message || 'Не вдалося надіслати голосове');
+    } finally {
+      setIsSendingVoice(false);
     }
   };
 
@@ -1379,13 +1523,14 @@ export default function Home() {
               ) : (
                 conversations.map((conv) => {
                   const isActive = activeChat?.id === conv.id;
+                  const unread = unreadCounts[conv.id] || 0;
                   const initials = (conv.otherUser.username || '')
                     .slice(0, 2)
                     .toUpperCase();
                   return (
                     <button
                       key={conv.id}
-                      className={`chat-row ${isActive ? 'active' : ''}`}
+                      className={`chat-row ${isActive ? 'active' : ''} ${unread > 0 ? 'has-unread' : ''}`}
                       onClick={() => openDirectConversation(conv)}
                     >
                       <div className="chat-row-avatar">
@@ -1413,6 +1558,14 @@ export default function Home() {
                           <span className="chat-row-preview">
                             {formatMessagePreview(conv.lastMessage, 'Немає повідомлень')}
                           </span>
+                          {unread > 0 && (
+                            <span
+                              className="chat-row-unread"
+                              title={`${unread} нових повідомлень`}
+                            >
+                              {unread > 99 ? '99+' : unread}
+                            </span>
+                          )}
                         </div>
                       </div>
                     </button>
@@ -1609,6 +1762,9 @@ export default function Home() {
                                       src={msg.attachment.url}
                                     />
                                   </div>
+                                ) : msg.attachment.type === 'audio' ? (
+                                  /* Голосове: щира хвиля (WebAudio) + плеер */
+                                  <VoicePlayer attachment={msg.attachment} />
                                 ) : (
                                   <a
                                     href={`/api/uploads/download/${msg.attachment.url.split('/').pop()}?name=${encodeURIComponent(msg.attachment.name || 'file')}`}
@@ -1741,44 +1897,78 @@ export default function Home() {
                         )}
                       </div>
                     )}
-                    <form className="chat-input-bar" onSubmit={handleSendMessage}>
-                      <input
-                        ref={fileInputRef}
-                        type="file"
-                        style={{ display: 'none' }}
-                        onChange={handleFileSelect}
+                    {/* Плашка помилки голосового запису/надсилання */}
+                    {voiceError && (
+                      <div className="voice-error" role="alert">
+                        <span>🎤 {voiceError}</span>
+                        <button
+                          type="button"
+                          className="staging-clear-btn"
+                          onClick={() => setVoiceError(null)}
+                          title="Закрити"
+                          aria-label="Закрити"
+                        >
+                          ✕
+                        </button>
+                      </div>
+                    )}
+                    {isRecording ? (
+                      /* Панель запису замінює поле вводу, поки йде запис */
+                      <VoiceRecordingBar
+                        recorder={recorderRef.current}
+                        onSend={handleVoiceSend}
+                        onCancel={handleVoiceCancel}
                       />
-                      <button
-                        type="button"
-                        className="attach-btn"
-                        title="Прикріпити медіа або файл"
-                        onClick={() => fileInputRef.current?.click()}
-                        disabled={isUploadingAttachment}
-                      >
-                        📎
-                      </button>
-                      <input
-                        type="text"
-                        placeholder={
-                          stagedAttachment
-                            ? 'Додайте підпис або надішліть...'
-                            : 'Напишіть повідомлення...'
-                        }
-                        value={inputText}
-                        onChange={handleInputChange}
-                        autoFocus
-                      />
-                      <button
-                        type="submit"
-                        className="send-btn"
-                        disabled={(!inputText.trim() && !stagedAttachment) || isUploadingAttachment}
-                        title="Надіслати"
-                      >
-                        <svg viewBox="0 0 24 24" fill="currentColor" width="20" height="20">
-                          <path d="M2.01 21L23 12 2.01 3 2 10l15 2-15 2z" />
-                        </svg>
-                      </button>
-                    </form>
+                    ) : (
+                      <form className="chat-input-bar" onSubmit={handleSendMessage}>
+                        <input
+                          ref={fileInputRef}
+                          type="file"
+                          style={{ display: 'none' }}
+                          onChange={handleFileSelect}
+                        />
+                        <button
+                          type="button"
+                          className="attach-btn"
+                          title="Прикріпити медіа або файл"
+                          onClick={() => fileInputRef.current?.click()}
+                          disabled={isUploadingAttachment}
+                        >
+                          📎
+                        </button>
+                        <button
+                          type="button"
+                          className="mic-btn"
+                          title="Голосове повідомлення"
+                          aria-label="Записати голосове повідомлення"
+                          onClick={handleMicClick}
+                          disabled={isSendingVoice}
+                        >
+                          🎤
+                        </button>
+                        <input
+                          type="text"
+                          placeholder={
+                            stagedAttachment
+                              ? 'Додайте підпис або надішліть...'
+                              : 'Напишіть повідомлення...'
+                          }
+                          value={inputText}
+                          onChange={handleInputChange}
+                          autoFocus
+                        />
+                        <button
+                          type="submit"
+                          className="send-btn"
+                          disabled={(!inputText.trim() && !stagedAttachment) || isUploadingAttachment}
+                          title="Надіслати"
+                        >
+                          <svg viewBox="0 0 24 24" fill="currentColor" width="20" height="20">
+                            <path d="M2.01 21L23 12 2.01 3 2 10l15 2-15 2z" />
+                          </svg>
+                        </button>
+                      </form>
+                    )}
                   </>
                 )}
               </>

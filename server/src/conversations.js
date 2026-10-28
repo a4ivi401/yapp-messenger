@@ -96,6 +96,9 @@ function formatConversationRow(row) {
     id: row.id,
     type: row.type,
     createdAt: row.created_at,
+    // Персистентні непрочитані: вхідні, старіші за власний watermark «прочитано»
+    // (NULL = ще нічого не читали — рахуємо всі вхідні). Скидаються через conversation:read.
+    unreadCount: Number(row.unread_count || 0),
     isMatch: Boolean(row.match_id),
     matchedAt: row.matched_at || null,
     otherUser: {
@@ -146,6 +149,13 @@ export async function getConversationForUser(conversationId, userId) {
        other_u.last_seen_at AS other_last_seen_at,
        other_p.last_delivered_at AS other_last_delivered_at,
        other_p.last_read_at      AS other_last_read_at,
+       my_p.last_read_at         AS my_last_read_at,
+       (SELECT COUNT(*)
+          FROM messages um
+         WHERE um.conversation_id = c.id
+           AND um.sender_id <> my_p.user_id
+           AND (my_p.last_read_at IS NULL OR um.created_at > my_p.last_read_at)
+       ) AS unread_count,
        lm.id            AS last_message_id,
        lm.body          AS last_message_body,
        lm.sender_id     AS last_message_sender_id,
@@ -197,6 +207,13 @@ export async function listConversationsForUser(userId) {
        other_u.last_seen_at AS other_last_seen_at,
        other_p.last_delivered_at AS other_last_delivered_at,
        other_p.last_read_at      AS other_last_read_at,
+       my_p.last_read_at         AS my_last_read_at,
+       (SELECT COUNT(*)
+          FROM messages um
+         WHERE um.conversation_id = c.id
+           AND um.sender_id <> my_p.user_id
+           AND (my_p.last_read_at IS NULL OR um.created_at > my_p.last_read_at)
+       ) AS unread_count,
        lm.id            AS last_message_id,
        lm.body          AS last_message_body,
        lm.sender_id     AS last_message_sender_id,

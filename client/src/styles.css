@@ -397,6 +397,47 @@ body {
   text-overflow: ellipsis;
 }
 
+/* Непрочитані: підсвічений рядок + круглий лічильник */
+.chat-row.has-unread {
+  background: var(--accent-soft);
+}
+
+.chat-row.has-unread .chat-row-name {
+  color: var(--accent-dark);
+  font-weight: 700;
+}
+
+.chat-row.has-unread .chat-row-preview {
+  color: var(--ink);
+  font-weight: 600;
+}
+
+.chat-row.has-unread .chat-row-time {
+  color: var(--accent-dark);
+}
+
+.chat-row-unread {
+  flex-shrink: 0;
+  min-width: 21px;
+  height: 21px;
+  padding: 0 6px;
+  display: grid;
+  place-items: center;
+  border-radius: 999px;
+  background: var(--accent);
+  color: #fff;
+  font-size: 11.5px;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  line-height: 1;
+}
+
+/* Активний рядок із непрочитаними: бейдж контрастує на фіолетовому тлі */
+.chat-row.active .chat-row-unread {
+  background: #fff;
+  color: var(--accent);
+}
+
 .status-dot {
   width: 9px;
   height: 9px;
@@ -1160,6 +1201,188 @@ body {
   background: rgba(255, 255, 255, 0.35);
 }
 
+/* Voice messages (день 9): бульбашка-плеер у повідомленні */
+.attachment-voice {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 240px;
+  max-width: 320px;
+  padding: 8px 12px;
+  border-radius: 12px;
+  /* Кольори хвилі: CSS-змінні, які canvas читає через getComputedStyle */
+  --voice-done: var(--accent);
+  --voice-rest: rgba(28, 25, 44, 0.16);
+}
+
+.message-out .attachment-voice {
+  --voice-done: rgba(255, 255, 255, 0.95);
+  --voice-rest: rgba(255, 255, 255, 0.4);
+}
+
+.voice-play-btn {
+  width: 36px;
+  height: 36px;
+  flex-shrink: 0;
+  display: grid;
+  place-items: center;
+  border: none;
+  border-radius: 50%;
+  cursor: pointer;
+  background: rgba(124, 58, 237, 0.12);
+  color: var(--accent);
+  transition: background 0.15s;
+}
+
+.voice-play-btn:hover {
+  background: rgba(124, 58, 237, 0.22);
+}
+
+.message-out .voice-play-btn {
+  background: rgba(255, 255, 255, 0.2);
+  color: white;
+}
+
+.message-out .voice-play-btn:hover {
+  background: rgba(255, 255, 255, 0.3);
+}
+
+.voice-canvas {
+  flex: 1;
+  min-width: 0;
+  height: 34px;
+  cursor: pointer;
+}
+
+.voice-duration {
+  flex-shrink: 0;
+  font-size: 11px;
+  opacity: 0.75;
+  font-variant-numeric: tabular-nums;
+}
+
+/* Деградація: браузер не відтворює контейнер (webm у Safari тощо) */
+.attachment-voice.is-unplayable {
+  min-width: 0;
+  max-width: 320px;
+  gap: 8px;
+}
+
+.voice-unplayable-icon {
+  font-size: 20px;
+  flex-shrink: 0;
+}
+
+.voice-unplayable-link {
+  font-size: 12.5px;
+  line-height: 1.35;
+  text-decoration: underline;
+  overflow-wrap: anywhere;
+}
+
+.message-out .voice-unplayable-link {
+  color: white;
+}
+
+.message-in .voice-unplayable-link {
+  color: var(--accent-dark);
+}
+
+/* Панель активного запису (замінює поле вводу) */
+.voice-recording-bar {
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 16px;
+  background: var(--panel);
+  border-top: 1px solid var(--border);
+  animation: slide-up 0.18s ease-out;
+}
+
+.voice-record-dot {
+  width: 12px;
+  height: 12px;
+  flex-shrink: 0;
+  border-radius: 50%;
+  background: var(--error);
+  animation: voice-pulse 1.2s ease-in-out infinite;
+}
+
+@keyframes voice-pulse {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.3;
+  }
+}
+
+.voice-record-time {
+  font-size: 13.5px;
+  font-weight: 600;
+  color: var(--ink);
+  font-variant-numeric: tabular-nums;
+}
+
+.voice-live-canvas {
+  flex: 1;
+  min-width: 0;
+  height: 36px;
+}
+
+.voice-cancel-btn {
+  width: 32px;
+  height: 32px;
+  flex-shrink: 0;
+  display: grid;
+  place-items: center;
+  border: none;
+  border-radius: 50%;
+  background: rgba(0, 0, 0, 0.05);
+  color: var(--muted);
+  cursor: pointer;
+  transition: background 0.15s;
+}
+
+.voice-cancel-btn:hover {
+  background: rgba(0, 0, 0, 0.1);
+}
+
+.voice-send-btn {
+  width: 38px;
+  height: 38px;
+  flex-shrink: 0;
+  display: grid;
+  place-items: center;
+  border: none;
+  border-radius: 50%;
+  background: var(--accent);
+  color: white;
+  cursor: pointer;
+  transition: background 0.15s;
+}
+
+.voice-send-btn:hover {
+  background: var(--accent-dark);
+}
+
+/* Плашка помилки запису/надсилання голосового */
+.voice-error {
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 8px 16px;
+  background: var(--panel);
+  border-top: 1px solid var(--border);
+  color: var(--error);
+  font-size: 13px;
+  animation: slide-up 0.18s ease-out;
+}
+
 /* Staging preview bar (above input bar) */
 .attachment-staging-bar {
   flex-shrink: 0;
@@ -1406,6 +1629,25 @@ body {
 }
 
 .attach-btn:hover {
+  opacity: 1;
+  background: var(--bg);
+}
+
+/* Кнопка мікрофона — стилістично кнопка 📎 */
+.mic-btn {
+  width: 40px;
+  height: 40px;
+  flex-shrink: 0;
+  border: none;
+  background: none;
+  font-size: 20px;
+  cursor: pointer;
+  border-radius: 50%;
+  opacity: 0.6;
+  transition: opacity 0.15s, background 0.15s;
+}
+
+.mic-btn:hover {
   opacity: 1;
   background: var(--bg);
 }

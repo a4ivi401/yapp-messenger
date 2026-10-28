@@ -9,7 +9,9 @@ import {
   UPLOADS_DIR,
   sanitizeExtension,
   detectCategory,
+  extensionForMime,
   isValidStoredFilename,
+  sniffContentType,
   BLOCKED_EXTENSIONS,
   MAX_FILE_SIZE,
 } from '../src/routes/uploads.js';
@@ -37,6 +39,12 @@ test('uploads: утиліти та правила валідації', async (t)
     assert.equal(detectCategory('application/octet-stream', '.mp3'), 'audio');
     assert.equal(detectCategory('application/octet-stream', '.wav'), 'audio');
 
+    // Голосові (день 9): mime від MediaRecorder містить codecs-суфікс,
+    // але теж має потрапляти в «audio» за префіксом
+    assert.equal(detectCategory('audio/webm;codecs=opus', '.webm'), 'audio');
+    assert.equal(detectCategory('audio/ogg;codecs=opus', '.ogg'), 'audio');
+    assert.equal(detectCategory('audio/mp4', '.m4a'), 'audio');
+
     assert.equal(detectCategory('video/mp4', '.mp4'), 'video');
     assert.equal(detectCategory('video/webm', '.webm'), 'video');
 
@@ -59,15 +67,41 @@ test('uploads: утиліти та правила валідації', async (t)
   await t.test('isValidStoredFilename захищає від path traversal', () => {
     assert.equal(isValidStoredFilename('550e8400-e29b-41d4-a716-446655440000.png'), true);
     assert.equal(isValidStoredFilename('valid_file-123.pdf'), true);
+    // Файли без розширення (старі голосові) теж валідні — символи виключають шляхи
+    assert.equal(isValidStoredFilename('550e8400-e29b-41d4-a716-446655440000'), true);
 
     // Спроби виходу з каталогу
     assert.equal(isValidStoredFilename('../passwd.txt'), false);
     assert.equal(isValidStoredFilename('..\\windows\\system32'), false);
     assert.equal(isValidStoredFilename('folder/sub.png'), false);
     assert.equal(isValidStoredFilename('file\0.jpg'), false);
-    assert.equal(isValidStoredFilename('no_extension'), false);
+    assert.equal(isValidStoredFilename('.'), false);
     assert.equal(isValidStoredFilename(''), false);
     assert.equal(isValidStoredFilename(null), false);
+  });
+
+  await t.test('extensionForMime виводить розширення з mime-бази', () => {
+    // mime від MediaRecorder містить codecs-суфікс — беремо голу базу
+    assert.equal(extensionForMime('audio/webm;codecs=opus'), '.webm');
+    assert.equal(extensionForMime('audio/ogg;codecs=opus'), '.ogg');
+    assert.equal(extensionForMime('audio/mp4'), '.m4a');
+    assert.equal(extensionForMime('image/jpeg'), '.jpg');
+    assert.equal(extensionForMime('application/pdf'), '');
+    assert.equal(extensionForMime(''), '');
+    assert.equal(extensionForMime(undefined), '');
+  });
+
+  await t.test('sniffContentType визначає тип за магічними байтами', () => {
+    // webm / matroska
+    assert.equal(
+      sniffContentType(Buffer.from([0x1a, 0x45, 0xdf, 0xa3, 0x01, 0x02, 0x03, 0x04])),
+      'audio/webm',
+    );
+    assert.equal(sniffContentType(Buffer.from('OggS...........')), 'audio/ogg');
+    assert.equal(sniffContentType(Buffer.from('ID3\x03...........')), 'audio/mpeg');
+    assert.equal(sniffContentType(Buffer.from('....ftypisom....')), 'video/mp4');
+    assert.equal(sniffContentType(Buffer.from('totally not media')), null);
+    assert.equal(sniffContentType(Buffer.from('x')), null);
   });
 });
 
@@ -142,6 +176,68 @@ test('uploadsRouter HTTP integration tests', async (t) => {
     assert.equal(res.status, 400);
     const body = await res.json();
     assert.match(body.error, /заборонено/i);
+  });
+
+  await t.test('POST /api/uploads приймає голосове (audio/webm) як вкладення типу «audio»', async () => {
+    mockAuthenticatedUser = { id: 'u-test-1', username: 'tester' };
+    const fakeVoiceBuffer = Buffer.from('1A45DFA3fake webm voice payload');
+    const formData = new FormData();
+    formData.append('file', new Blob([fakeVoiceBuffer], { type: 'audio/webm' }), 'voice.webm');
+
+    const res = await fetch(`${baseUrl}/api/uploads`, {
+      method: 'POST',
+      body: formData,
+    });
+    assert.equal(res.status, 201);
+    const body = await res.json();
+
+    assert.ok(body.attachment);
+    assert.equal(body.attachment.type, 'audio');
+    assert.equal(body.attachment.mime, 'audio/webm');
+    assert.match(body.attachment.url, /^\/api\/uploads\/files\/[a-zA-Z0-9_-]+\.webm$/);
+
+    uploadedFilesToCleanup.push(body.attachment.url.split('/').pop());
+  });
+
+  await t.test('POST /api/uploads виводить розширення з mime, якщо імʼя без нього', async () => {
+    mockAuthenticatedUser = { id: 'u-test-1', username: 'tester' };
+    // Регресія дня 9: браузер надіслав файл без розширення в імені — голосове
+    // збереглося як «uuid» без «.webm» і не відтворювалось (<audio> отримував 400)
+    const fakeVoiceBuffer = Buffer.from('1A45DFA3fake webm voice payload');
+    const formData = new FormData();
+    formData.append('file', new Blob([fakeVoiceBuffer], { type: 'audio/webm' }), 'webm');
+
+    const res = await fetch(`${baseUrl}/api/uploads`, {
+      method: 'POST',
+      body: formData,
+    });
+    assert.equal(res.status, 201);
+    const body = await res.json();
+
+    assert.ok(body.attachment);
+    assert.equal(body.attachment.type, 'audio');
+    assert.match(body.attachment.url, /^\/api\/uploads\/files\/[a-zA-Z0-9_-]+\.webm$/);
+    assert.notEqual(body.attachment.url, body.attachment.url.replace('.webm', ''));
+
+    uploadedFilesToCleanup.push(body.attachment.url.split('/').pop());
+  });
+
+  await t.test('GET /api/uploads/files/:filename віддає файл без розширення за магічними байтами', async () => {
+    mockAuthenticatedUser = { id: 'u-test-1', username: 'tester' };
+    // Штучно кладемо extensionless-файл (як голосові, збережені до виправлення)
+    const legacyName = 'legacy-voice-test-noext';
+    const legacyPayload = Buffer.concat([
+      Buffer.from([0x1a, 0x45, 0xdf, 0xa3]),
+      Buffer.from('fake webm body for legacy serving test'),
+    ]);
+    fs.writeFileSync(path.resolve(UPLOADS_DIR, legacyName), legacyPayload);
+    uploadedFilesToCleanup.push(legacyName);
+
+    const res = await fetch(`${baseUrl}/api/uploads/files/${legacyName}`);
+    assert.equal(res.status, 200);
+    assert.equal(res.headers.get('content-type'), 'audio/webm');
+    assert.match(res.headers.get('cache-control') || '', /immutable/);
+    assert.equal(Buffer.from(await res.arrayBuffer()).equals(legacyPayload), true);
   });
 
   let uploadedAttachment = null;

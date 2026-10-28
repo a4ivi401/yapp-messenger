@@ -27,7 +27,7 @@ A messenger where you can chat with a random stranger, and if a **match** happen
 | Browser & audio chime notifications (Web Audio & Notifications API) | ✅ done |
 | Random anonymous chat, session exclusion & mutual match | ✅ done |
 | Message statuses «✓ sent → ✓✓ delivered → ✓✓ read» and "typing…" indicator (Socket.IO) | ✅ done |
-| Media / voice messages | 🎯 planned |
+| Media / voice messages | ✅ done |
 
 ## Roadmap (2 weeks · ~2 h/day ≈ 28 h)
 
@@ -38,7 +38,7 @@ A messenger where you can chat with a random stranger, and if a **match** happen
 | **M0** | Project skeleton + auth | 1 | ✅ done |
 | **M1** | Live chat — the messenger core | 2–4 | ✅ done |
 | **M2** | Random stranger + matching (**twist**) | 5–6 | ✅ done |
-| **M3** | Statuses, media & extras | 7–11 | 🚧 7 ✅ · 8–11 planned |
+| **M3** | Statuses, media & extras | 7–11 | 🚧 7–9 ✅ · 10–11 planned |
 | **M4** | Deployment & defense prep | 12–14 | 🎯 planned |
 
 ### 📅 Day-by-day
@@ -55,7 +55,7 @@ Priority legend: 🟣 **core** (can't pass without it) · ⚪ **leftover** (only
 | **6** ✅ | Matching: `matches` model (migration 004), canonical UUID pair ordering, mutual match persistence in DB, stats API, realtime `match:new`, visual "🎲 Метч" badges | 🟣 |
 | **7** ✅ | "Delivered / read" statuses + "typing…" indicator + real presence ("online" / "last seen …"): watermark model on `conversation_participants` (migration 005), `users.last_seen_at` (migration 006), `conversation:read`, `message:delivered`, `typing`, `presence:update` events; the "🎲 Match" badge was removed from the chat list and header (it will return as a separate accent) | 🟣 minimum |
 | **8** ✅ | Media: photos & files (`multer`, `uploads` volume), image previews, modal lightbox, secure storage & downloads | ⚪ |
-| **9** | Voice messages (MediaRecorder: record → upload → playback) | ⚪ |
+| **9** ✅ | Voice messages: MediaRecorder recording with a live waveform, auto-send, player with a real waveform (WebAudio), seek, microphone permission handling | ⚪ |
 | **10** | Edit / delete messages + search across chats and contacts | ⚪ |
 | **11** | Block / report in the anonymous chat + basic rate limiting | ⚪ |
 | **12** | Responsive polish: empty states, errors, Ukrainian zod messages | 🟣 polish |
@@ -74,8 +74,8 @@ Priority legend: 🟣 **core** (can't pass without it) · ⚪ **leftover** (only
 - HTTPS deployment + demo + README
 
 **⚪ Leftover time** (add in this order, if time remains):
-1. Photos / files
-2. Voice messages
+1. Photos / files ✅
+2. Voice messages ✅
 3. Edit / delete + search
 4. Block / report + rate limiting
 5. Dark theme
@@ -147,7 +147,7 @@ Open **http://localhost:5173**. (Kill the docker stack first if ports are taken:
 | GET | `/api/matches` | user's mutual match history `{ matches }` |
 | GET | `/api/matches/stats` | aggregated user stats `{ matchesCount, contactsCount }` |
 | GET | `/api/users/search?q=...` | global user search by username substring with `isContact` flag |
-| POST | `/api/uploads` | `multipart/form-data` with `file` field — upload photo or file (up to 20 MB); returns `{ attachment: { url, type, name, size, mime } }` |
+| POST | `/api/uploads` | `multipart/form-data` with `file` field — upload photo, file or voice message (voice.webm/.ogg/.m4a, up to 100 MB); returns `{ attachment: { url, type, name, size, mime } }` |
 | GET | `/api/uploads/files/:filename` | direct media file delivery with `Cache-Control: immutable` and `X-Content-Type-Options: nosniff` |
 | GET | `/api/uploads/download/:filename?name=...` | secure file download preserving original filename (`Content-Disposition: attachment`) |
 
@@ -229,5 +229,5 @@ yapp-messenger/
 - Passwords — `crypto.scrypt` with a random salt (`salt:hash`), verified with `timingSafeEqual`.
 - Sessions — random token stored in DB, carried only in an httpOnly cookie.
 - Parameterized SQL everywhere; input validated with zod.
-- File uploads — 20 MB size limit, dangerous/executable extension blocking (.exe, .bat, .sh, .php, etc.), UUID storage filename validation preventing path traversal, isolated `uploads` volume.
+- File uploads — 100 MB size limit, dangerous/executable extension blocking (.exe, .bat, .sh, .php, etc.), UUID storage filename validation preventing path traversal, isolated `uploads` volume.
 - Planned: HTTPS on deployment.
