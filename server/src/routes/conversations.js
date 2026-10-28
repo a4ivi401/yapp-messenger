@@ -8,6 +8,7 @@ import {
   isParticipant,
   listConversationsForUser,
   listMessages,
+  listMessagesAround,
   createMessage,
   getConversationParticipantIds,
 } from '../conversations.js';
@@ -47,6 +48,8 @@ const messageSchema = z
 const listMessagesQuerySchema = z.object({
   limit: z.coerce.number().int().min(1).max(100).default(50),
   before: z.string().uuid().optional(),
+  // Вікно навколо повідомлення (перехід зі пошуку): старші, цільове, новіші
+  around: z.string().uuid().optional(),
 });
 
 export const conversationsRouter = Router();
@@ -123,6 +126,18 @@ conversationsRouter.get(
     }
 
     try {
+      // around має пріоритет: клієнт навмисно йде до конкретного повідомлення
+      if (parsed.data.around) {
+        const window = await listMessagesAround(
+          req.params.id,
+          parsed.data.around,
+          req.user.user_id,
+        );
+        if (!window) {
+          return res.status(404).json({ error: 'Повідомлення не знайдено' });
+        }
+        return res.json(window);
+      }
       const result = await listMessages(req.params.id, parsed.data);
       res.json(result);
     } catch (err) {

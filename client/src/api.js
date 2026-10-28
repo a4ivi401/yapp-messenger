@@ -32,10 +32,11 @@ export const api = {
   createConversation: (username) =>
     request('/api/conversations', { method: 'POST', body: JSON.stringify({ username }) }),
   getConversation: (id) => request(`/api/conversations/${id}`),
-  listMessages: (id, { limit, before } = {}) => {
+  listMessages: (id, { limit, before, around } = {}) => {
     const params = new URLSearchParams();
     if (limit != null) params.set('limit', limit);
     if (before) params.set('before', before);
+    if (around) params.set('around', around);
     const qs = params.toString();
     return request(`/api/conversations/${id}/messages${qs ? `?${qs}` : ''}`);
   },

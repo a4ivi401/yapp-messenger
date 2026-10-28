@@ -156,6 +156,9 @@ export default function Home() {
   const [inputText, setInputText] = useState('');
   const [isLoadingMessages, setIsLoadingMessages] = useState(false);
 
+  // Підсвітка повідомлення, до якого перейшли зі пошуку
+  const [highlightMessageId, setHighlightMessageId] = useState(null);
+
   // Контекстне меню повідомлення: { msg, x, y } | null. Позиція вже обрізана до вікна.
   const [contextMenu, setContextMenu] = useState(null);
   // Режим редагування: id повідомлення, що редагується (null = звичайне надсилання)
@@ -226,6 +229,11 @@ export default function Home() {
   const socketRef = useRef(null);
   const messagesEndRef = useRef(null);
 
+  // Перехід до повідомлення зі пошуку: очікуваний id (поки сторінка не завантажена)
+  // та таймер скидання підсвітки
+  const pendingFocusRef = useRef(null);
+  const highlightTimerRef = useRef(null);
+
   // Таймери «друкує…». Refs, а не state: вони не впливають на рендер.
   const typingStopTimerRef = useRef(null);
   const typingHideTimerRef = useRef(null);
@@ -235,6 +243,19 @@ export default function Home() {
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [messages]);
+
+  // Перехід до знайденого зі пошуку повідомлення: чекаємо, поки ціль опиниться в
+  // завантаженій сторінці, потім скрол up-center + підсвітка. Мусить іти після
+  // автоскролу (вище), щоб перехід до цілі виграв у черзі плавних скролів.
+  useEffect(() => {
+    const targetId = pendingFocusRef.current;
+    if (!targetId || isLoadingMessages || !messages.some((m) => m.id === targetId)) {
+      return undefined;
+    }
+    pendingFocusRef.current = null;
+    scrollAndHighlight(targetId);
+    return undefined;
+  }, [messages, isLoadingMessages]);
 
   // Закриття перегляду фото на Esc
   useEffect(() => {
@@ -409,11 +430,45 @@ export default function Home() {
     [],
   );
 
-  // Відкриття прямого діалогу
+  // Скрол до повідомлення (у центр вікна) + підсвітка на кілька секунд.
+  // Повертає false, якщо елемента немає у DOM (цільова ще не завантажена).
+  const scrollAndHighlight = useCallback((messageId) => {
+    const el = document.querySelector(`[data-message-id="${messageId}"]`);
+    if (!el) return false;
+    el.scrollIntoView({ block: 'center', behavior: 'smooth' });
+    setHighlightMessageId(messageId);
+    clearTimeout(highlightTimerRef.current);
+    highlightTimerRef.current = setTimeout(() => setHighlightMessageId(null), 2600);
+    return true;
+  }, []);
+
+  const messagesRef = useRef(messages);
+  messagesRef.current = messages;
+
+  // Відкриття прямого діалогу. focusMessageId — перейти до конкретного повідомлення
+  // зі пошуку: історію завантажуємо вікном навколо нього (`?around=...`)
   const openDirectConversation = useCallback(
-    (conv) => {
+    (conv, focusMessageId = null) => {
       const prevChat = activeChatRef.current;
-      if (prevChat?.id === conv.id) return;
+      if (prevChat?.id === conv.id) {
+        if (!focusMessageId) return;
+        // Той самий чат уже відкритий: підсвічуємо ціль, якщо вона вже у вікні
+        // (messagesRef — свіжий стан без перестворення колбека), інакше
+        // перечитуємо історію навколо неї — ціль старіша за завантажене вікно.
+        if (!scrollAndHighlight(focusMessageId)) {
+          pendingFocusRef.current = focusMessageId;
+          setIsLoadingMessages(true);
+          api
+            .listMessages(conv.id, { around: focusMessageId })
+            .then((res) => setMessages(res.messages || []))
+            .catch((err) => {
+              console.error('Failed to load messages:', err);
+              pendingFocusRef.current = null;
+            })
+            .finally(() => setIsLoadingMessages(false));
+        }
+        return;
+      }
 
       stopTyping();
 
@@ -458,13 +513,28 @@ export default function Home() {
       }));
 
       setIsLoadingMessages(true);
-      api
-        .listMessages(conv.id)
+      // З цільовим повідомленням (пошук → чат): вікно навколо нього замість
+      // найсвіжішої сторінки, щоб ціль гарантовано була в списку. Фолбек на
+      // звичайну сторінку захищає від недоступної цілі (видалено без tombstone).
+      if (focusMessageId) pendingFocusRef.current = focusMessageId;
+      const initialLoad = focusMessageId
+        ? api
+            .listMessages(conv.id, { around: focusMessageId })
+            .catch(() => api.listMessages(conv.id))
+        : api.listMessages(conv.id);
+
+      initialLoad
         .then((res) => {
           setMessages(res.messages || []);
+          // Фолбек-сторінка може не містити цілі (наприклад, tombstone пішов
+          // із БД) — тоді очікування фокусу знімаємо, скрол не чекає вічно.
+          if (focusMessageId && !(res.messages || []).some((m) => m.id === focusMessageId)) {
+            pendingFocusRef.current = null;
+          }
         })
         .catch((err) => {
           console.error('Failed to load messages:', err);
+          pendingFocusRef.current = null;
         })
         .finally(() => {
           setIsLoadingMessages(false);
@@ -474,7 +544,7 @@ export default function Home() {
         socketRef.current.emit('conversation:join', { conversationId: conv.id });
       }
     },
-    [stopTyping],
+    [stopTyping, scrollAndHighlight],
   );
 
   // Підключення та обробка Socket.IO
@@ -1196,12 +1266,14 @@ export default function Home() {
     }
   };
 
-  // Клік по результату пошуку в повідомленнях: відкрити той діалог
+  // Клік по результату пошуку в повідомленнях: відкрити той діалог, прокрутити
+  // до знайденого повідомлення і підсвітити його
   const openFromMessageResult = async (item) => {
     const convId = item.message.conversationId;
+    const focusId = item.message.id;
     const existing = conversations.find((c) => c.id === convId);
     if (existing) {
-      openDirectConversation(existing);
+      openDirectConversation(existing, focusId);
       setSearchQuery('');
       return;
     }
@@ -1213,7 +1285,7 @@ export default function Home() {
           if (prev.some((c) => c.id === res.conversation.id)) return prev;
           return [res.conversation, ...prev];
         });
-        openDirectConversation(res.conversation);
+        openDirectConversation(res.conversation, focusId);
       }
     } catch (err) {
       console.error('Failed to open conversation from search:', err);
@@ -2114,7 +2186,10 @@ export default function Home() {
                       return (
                         <div
                           key={msg.id}
-                          className={`message-row ${isMe ? 'message-out' : 'message-in'}`}
+                          className={`message-row ${isMe ? 'message-out' : 'message-in'} ${
+                            msg.id === highlightMessageId ? 'is-highlighted' : ''
+                          }`}
+                          data-message-id={msg.id}
                           onContextMenu={(e) => handleOpenContextMenu(e, msg)}
                         >
                           <div className="message-bubble">

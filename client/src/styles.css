@@ -2028,6 +2028,32 @@ body {
   font-weight: 600;
 }
 
+/* Перехід до повідомлення зі пошуку: мʼякий пульс підсвітки (~2.6 c),
+   аура на бульбашці + легке залиття рядка, щоб не губились довгі повідомлення */
+@keyframes message-focus-pulse {
+  0% {
+    background: transparent;
+  }
+  20% {
+    background: var(--accent-soft);
+  }
+  75% {
+    background: var(--accent-soft);
+  }
+  100% {
+    background: transparent;
+  }
+}
+
+.message-row.is-highlighted {
+  animation: message-focus-pulse 2.6s ease;
+  border-radius: 12px;
+}
+
+.message-row.is-highlighted .message-bubble {
+  box-shadow: 0 0 0 2px var(--accent);
+}
+
    MOBILE — native-app interface (≤ 768px)
    ============================================ */
 @media (max-width: 768px) {

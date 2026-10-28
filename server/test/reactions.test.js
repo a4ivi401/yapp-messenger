@@ -7,6 +7,7 @@ import {
   editMessage,
   findOrCreateDirectConversation,
   listMessages,
+  listMessagesAround,
   searchMessages,
   setMessageReaction,
 } from '../src/conversations.js';
@@ -122,6 +123,54 @@ test('conversations.js: реакції, редагування, tombstone та �
     assert.ok(found.editedAt);
     assert.equal(found.reactions['👍'].count, 1);
     assert.equal(found.reactions['❤️'].count, 1);
+  });
+
+  await t.test('listMessagesAround дає вікно навколо цілі з прапорцями hasMore', async () => {
+    // Розгортаємо до 30 повідомлень: історія значно довша за вікно (context = 3)
+    const extra = [];
+    for (let i = 0; i < 30; i += 1) {
+      extra.push(await createMessage(conversationId, senderId, `наповнювач ${i}`));
+    }
+
+    // Ціль — перше повідомлення діалогу: перед ним нічого, після — довга історія
+    const aroundFirst = await listMessagesAround(conversationId, message.id, senderId, { context: 3 });
+    assert.ok(aroundFirst);
+    assert.equal(aroundFirst.hasMoreBefore, false);
+    assert.equal(aroundFirst.hasMoreAfter, true);
+    assert.equal(aroundFirst.messages[0].id, message.id);
+    assert.equal(aroundFirst.messages.length, 4); // ціль + 3 новіших
+
+    // Вікно без дублікатів і суворо зростає в часі (напівмікросекундна точність
+    // created_at не повинна «розмножувати» ціль: JS Date втрачає мікросекунди)
+    const windowIds = aroundFirst.messages.map((m) => m.id);
+    assert.equal(new Set(windowIds).size, windowIds.length, 'цільове не дублюється у вікні');
+    for (let i = 1; i < aroundFirst.messages.length; i += 1) {
+      assert.equal(
+        new Date(aroundFirst.messages[i].createdAt).getTime() >=
+          new Date(aroundFirst.messages[i - 1].createdAt).getTime(),
+        true,
+        'хронологія вікна не зрізає рядки',
+      );
+    }
+
+    // Ціль свіжіша за вікно з обох боків
+    const newest = extra[extra.length - 1];
+    const aroundLast = await listMessagesAround(conversationId, newest.id, senderId, { context: 3 });
+    assert.equal(aroundLast.messages[aroundLast.messages.length - 1].id, newest.id);
+    assert.equal(aroundLast.hasMoreBefore, true);
+    assert.equal(aroundLast.hasMoreAfter, false);
+
+    // Сторонній (не учасник) цілі не бачить; неіснуюче повідомлення → null
+    assert.equal(await listMessagesAround(conversationId, newest.id, outsiderId), null);
+    assert.equal(
+      await listMessagesAround(conversationId, '00000000-0000-4000-8000-000000000000', senderId),
+      null,
+    );
+
+    // Реакції цілі присутні у вікні
+    const targetInWindow = aroundFirst.messages[0];
+    assert.equal(targetInWindow.reactions['👍'].count, 1);
+    assert.equal(targetInWindow.reactions['❤️'].count, 1);
   });
 
   await t.test('searchMessages знаходить тіло у межах своїх діалогів', async () => {

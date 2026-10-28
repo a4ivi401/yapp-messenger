@@ -582,6 +582,73 @@ export async function listMessages(conversationId, { limit = 50, before = null }
 }
 
 /**
+ * Вікно повідомлень навколо цільового (перехід до повідомлення зі пошуку).
+ * Повертає до `context` повідомлень перед цільовим та після нього
+ * (хронологічно ASC), щоб ціль гарантовано потрапила у список клієнта,
+ * і прапорці, чи є історія поза вікном. null — цільового не існує або
+ * я не учасник діалогу (перевірка учасника в самому запиті цільового).
+ */
+export async function listMessagesAround(conversationId, messageId, userId, { context = 12 } = {}) {
+  const pageSelect = `SELECT m.id, m.conversation_id, m.sender_id, m.body, m.created_at,
+              m.edited_at, m.deleted_at,
+              m.attachment_url, m.attachment_type, m.attachment_name,
+              m.attachment_size, m.attachment_mime,
+              u.username AS sender_username
+         FROM messages m
+         JOIN users u ON u.id = m.sender_id`;
+
+  const { rows: targetRows } = await query(
+    `${pageSelect}
+      WHERE m.id = $1 AND m.conversation_id = $2
+        AND EXISTS (
+          SELECT 1 FROM conversation_participants p
+           WHERE p.conversation_id = m.conversation_id AND p.user_id = $3
+        )`,
+    [messageId, conversationId, userId],
+  );
+  if (targetRows.length === 0) return null;
+  const target = targetRows[0];
+
+  // created_at курсора розвʼязуємо ВСЕРЕДИНІ SQL підзапитом: node-pg віддає
+  // timestamptz як JS Date з точністю до мс, а в БД значення мікросекундне —
+  // параметр, що повернувся через JS, «зсуває» ціль у сусідні сторінки
+  // (обидва запити включали ціль у вибірку, що давало дублікат у списку).
+  const [beforeRes, afterRes] = await Promise.all([
+    query(
+      `${pageSelect}
+        WHERE m.conversation_id = $1
+          AND (m.created_at, m.id) < ((SELECT created_at FROM messages WHERE id = $2::uuid), $2::uuid)
+        ORDER BY m.created_at DESC, m.id DESC
+        LIMIT $3`,
+      [conversationId, messageId, context + 1],
+    ),
+    query(
+      `${pageSelect}
+        WHERE m.conversation_id = $1
+          AND (m.created_at, m.id) > ((SELECT created_at FROM messages WHERE id = $2::uuid), $2::uuid)
+        ORDER BY m.created_at ASC, m.id ASC
+        LIMIT $3`,
+      [conversationId, messageId, context + 1],
+    ),
+  ]);
+
+  const hasMoreBefore = beforeRes.rows.length > context;
+  const hasMoreAfter = afterRes.rows.length > context;
+  const beforeRows = beforeRes.rows.slice(0, context);
+  const afterRows = afterRes.rows.slice(0, context);
+
+  // Хронологія: старі → цільове → нові
+  const pageRows = [...beforeRows].reverse().concat([target], afterRows);
+  await attachReactions(pageRows);
+
+  return {
+    messages: pageRows.map(formatMessageRow),
+    hasMoreBefore,
+    hasMoreAfter,
+  };
+}
+
+/**
  * Створює нове повідомлення в діалозі.
  */
 export async function createMessage(conversationId, senderId, body, attachment = null) {
