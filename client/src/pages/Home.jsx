@@ -269,7 +269,8 @@ export default function Home() {
   }, [activeChat?.id]);
 
   // Закриття контекстного меню: Esc, клік будь-де, скрол чата.
-  // Внутрішні кліки меню зупиняються stopPropagation, тож глобальний mousedown їх не бачить.
+  // Внутрішні кліки меню зупиняють обидві події (mousedown + click), тож глобальний
+  // closer їх не бачить; інакше mousedown закрив би меню до активації пункту.
   useEffect(() => {
     if (!contextMenu) return undefined;
 
@@ -2528,6 +2529,9 @@ export default function Home() {
         <div
           className="context-menu"
           style={{ left: contextMenu.x, top: contextMenu.y }}
+          // Стоп-продаж обом фазам: тільки так глобальний mousedown-closer
+          // не закриє меню перед тим, як клік по пункту встигне відпрацювати
+          onMouseDown={(e) => e.stopPropagation()}
           onClick={(e) => e.stopPropagation()}
           onContextMenu={(e) => {
             e.preventDefault();

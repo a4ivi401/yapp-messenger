@@ -399,17 +399,40 @@ export async function setMessageReaction(messageId, userId, emoji) {
  * Повертає свіжий об'єкт повідомлення (з edited_at) або null.
  */
 export async function editMessage(messageId, userId, body) {
-  const { rows } = await query(
-    `UPDATE messages
-        SET body = $3, edited_at = now(), deleted_at = NULL
-      WHERE id = $1 AND sender_id = $2 AND deleted_at IS NULL
-      RETURNING id, conversation_id, sender_id, body, created_at, edited_at, deleted_at,
-                attachment_url, attachment_type, attachment_name, attachment_size, attachment_mime,
-                (SELECT username FROM users WHERE id = messages.sender_id) AS sender_username,
-                NULL::jsonb AS reaction_rows`,
-    [messageId, userId, body],
-  );
-  return rows[0] ? formatMessageRow(rows[0]) : null;
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    const { rows } = await client.query(
+      `UPDATE messages
+          SET body = $3, edited_at = now(), deleted_at = NULL
+        WHERE id = $1 AND sender_id = $2 AND deleted_at IS NULL
+        RETURNING id, conversation_id, sender_id, body, created_at, edited_at, deleted_at,
+                  attachment_url, attachment_type, attachment_name, attachment_size, attachment_mime,
+                  (SELECT username FROM users WHERE id = messages.sender_id) AS sender_username`,
+      [messageId, userId, body],
+    );
+    if (rows.length === 0) {
+      await client.query('ROLLBACK');
+      return null;
+    }
+
+    // Свіжий агрегат реакцій у тій самій транзакції: editMessage повертає повний
+    // об'єкт повідомлення, тож broadcast message:updated не обнуляє чіпси реакцій.
+    const { rows: reactionRows } = await client.query(
+      `SELECT emoji, user_id FROM message_reactions WHERE message_id = $1`,
+      [messageId],
+    );
+    await client.query('COMMIT');
+
+    const message = rows[0];
+    message.reaction_rows = reactionRows;
+    return formatMessageRow(message);
+  } catch (err) {
+    await client.query('ROLLBACK').catch(() => {});
+    throw err;
+  } finally {
+    client.release();
+  }
 }
 
 /**

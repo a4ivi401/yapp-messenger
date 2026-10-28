@@ -105,12 +105,22 @@ test('conversations.js: реакції, редагування, tombstone та �
     assert.equal(await editMessage(message.id, partnerId, 'зламано'), null);
   });
 
+  await t.test('editMessage не втрачає агрегат реакцій (баг message:updated)', async () => {
+    // Встановлюємо реакцію і редагуємо: повернений message має нести актуальні реакції
+    await setMessageReaction(message.id, partnerId, '👍');
+    const edited = await editMessage(message.id, senderId, 'все добре, реакції на місці?');
+    assert.ok(edited);
+    assert.equal(edited.reactions['👍'].count, 1);
+    assert.deepEqual(edited.reactions['👍'].userIds, [partnerId]);
+  });
+
   await t.test('listMessages повертає edited_at та агрегат реакцій', async () => {
     const { messages } = await listMessages(conversationId);
     const found = messages.find((m) => m.id === message.id);
     assert.ok(found);
-    assert.equal(found.body, 'все добре!');
+    assert.equal(found.body, 'все добре, реакції на місці?');
     assert.ok(found.editedAt);
+    assert.equal(found.reactions['👍'].count, 1);
     assert.equal(found.reactions['❤️'].count, 1);
   });
 
