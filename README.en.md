@@ -30,6 +30,7 @@ A messenger where you can chat with a random stranger, and if a **match** happen
 | Media / voice messages | ✅ done |
 | Emoji reactions (1 user × 1 emoji) + context menu: copy / edit / delete (Socket.IO) | ✅ done |
 | Search across message bodies in all chats + contacts filter in search results | ✅ done |
+| Search → chat jump: open the dialog, scroll to the found message and highlight it | ✅ done |
 
 ## Roadmap (2 weeks · ~2 h/day ≈ 28 h)
 
@@ -141,7 +142,7 @@ Open **http://localhost:5173**. (Kill the docker stack first if ports are taken:
 | GET | `/api/conversations` | user's conversations (with participant, last message preview and read watermarks) |
 | POST | `/api/conversations` | `{ username }` — find or create direct conversation |
 | GET | `/api/conversations/:id` | conversation details (participant only) |
-| GET | `/api/conversations/:id/messages` | message history (includes `senderUsername`); pagination `?limit=50&before=<id>` |
+| GET | `/api/conversations/:id/messages` | message history (includes `senderUsername`); pagination `?limit=50&before=<id>` or a window around a message `?around=<id>` (search → chat jump: up to 12 older + target + up to 12 newer) |
 | POST | `/api/conversations/:id/messages` | `{ body?, attachment? }` — send a message (text, attachment, or both) |
 | GET | `/api/contacts` | list of saved contacts and total count `{ contacts, count }` |
 | POST | `/api/contacts` | `{ username }` or `{ userId }` — add user to contacts (idempotent, self-contact validation) |
