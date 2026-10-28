@@ -9,6 +9,10 @@ import {
   getConversationForUser,
   markConversationRead,
   markMessageDelivered,
+  setMessageReaction,
+  editMessage,
+  deleteMessage,
+  REACTION_EMOJIS,
 } from './conversations.js';
 import { addContact } from './contacts.js';
 import { recordMatch } from './matches.js';
@@ -26,6 +30,9 @@ import {
   leaveSession,
   requestContactMatch,
   saveStrangerMessage,
+  setStrangerReaction,
+  editStrangerMessage,
+  deleteStrangerMessage,
   getSession,
   getSessionByUserId,
   handleDisconnect,
@@ -84,6 +91,22 @@ const deliveredSchema = z.object({
   messageId: z.string().uuid(),
 });
 
+const messageReactSchema = z.object({
+  messageId: z.string().uuid(),
+  // null = зняти реакцію (toggle); невідомі емодзі відсіює z.enum —
+  // у message_reactions потрапляє лише набір з REACTION_EMOJIS
+  emoji: z.enum(REACTION_EMOJIS).optional().nullable(),
+});
+
+const messageEditSchema = z.object({
+  messageId: z.string().uuid(),
+  body: z.string().trim().min(1).max(4000),
+});
+
+const messageDeleteSchema = z.object({
+  messageId: z.string().uuid(),
+});
+
 const typingSchema = z.object({
   conversationId: z.string().uuid(),
   isTyping: z.boolean(),
@@ -92,6 +115,25 @@ const typingSchema = z.object({
 const strangerTypingSchema = z.object({
   sessionId: z.string().uuid(),
   isTyping: z.boolean(),
+});
+
+const strangerReactionSchema = z.object({
+  sessionId: z.string().uuid(),
+  messageId: z.string().min(1),
+  // null = зняти реакцію (toggle); невідомі емодзі відсіює z.enum
+  emoji: z.enum(REACTION_EMOJIS).optional().nullable(),
+});
+
+// messageId ефемерних повідомлень не uuid, тому просто непорожній рядок
+const strangerEditSchema = z.object({
+  sessionId: z.string().uuid(),
+  messageId: z.string().min(1),
+  body: z.string().trim().min(1).max(4000),
+});
+
+const strangerDeleteSchema = z.object({
+  sessionId: z.string().uuid(),
+  messageId: z.string().min(1),
 });
 
 // Не частіше одного typing-сигналу на адресата за 500 мс: клієнт уже тротлить,
@@ -260,6 +302,101 @@ export function setupSocket(io) {
         ack?.({ ok: true, message });
       } catch (err) {
         console.error('message:send error:', err);
+        ack?.({ ok: false, error: 'Внутрішня помилка' });
+      }
+    });
+
+    // Ставить / знімає реакцію (toggle) на повідомлення постійного діалогу
+    socket.on('message:react', async (data, ack) => {
+      try {
+        const parsed = messageReactSchema.safeParse(data);
+        if (!parsed.success) {
+          return ack?.({ ok: false, error: parsed.error.issues[0].message });
+        }
+
+        const { messageId } = parsed.data;
+        const emoji = parsed.data.emoji || null;
+        const result = await setMessageReaction(messageId, socket.user.id, emoji);
+        if (!result) {
+          // null = «нічого не змінилось»: no-op повторного кліку або немає прав.
+          // Інтерпретують однаково (ok без розсилки), щоб подія не стала оракулом
+          // для перебору чужих messageId.
+          return ack?.({ ok: true });
+        }
+
+        const participantIds = await getConversationParticipantIds(result.conversationId);
+        const targetRooms = [
+          `conversation:${result.conversationId}`,
+          ...participantIds.map((id) => `user:${id}`),
+        ];
+        io.to(targetRooms).emit('message:reaction', {
+          conversationId: result.conversationId,
+          messageId,
+          reactions: result.reactions,
+        });
+
+        ack?.({ ok: true });
+      } catch (err) {
+        console.error('message:react error:', err);
+        ack?.({ ok: false, error: 'Внутрішня помилка' });
+      }
+    });
+
+    // Редагування власного повідомлення постійного діалогу
+    socket.on('message:edit', async (data, ack) => {
+      try {
+        const parsed = messageEditSchema.safeParse(data);
+        if (!parsed.success) {
+          return ack?.({ ok: false, error: parsed.error.issues[0].message });
+        }
+
+        const { messageId, body } = parsed.data;
+        const message = await editMessage(messageId, socket.user.id, body);
+        if (!message) {
+          return ack?.({ ok: false, error: 'Повідомлення не знайдено' });
+        }
+
+        const participantIds = await getConversationParticipantIds(message.conversationId);
+        const targetRooms = [
+          `conversation:${message.conversationId}`,
+          ...participantIds.map((id) => `user:${id}`),
+        ];
+        io.to(targetRooms).emit('message:updated', { message });
+
+        ack?.({ ok: true, message });
+      } catch (err) {
+        console.error('message:edit error:', err);
+        ack?.({ ok: false, error: 'Внутрішня помилка' });
+      }
+    });
+
+    // Tombstone-видалення власного повідомлення постійного діалогу
+    socket.on('message:delete', async (data, ack) => {
+      try {
+        const parsed = messageDeleteSchema.safeParse(data);
+        if (!parsed.success) {
+          return ack?.({ ok: false, error: parsed.error.issues[0].message });
+        }
+
+        const { messageId } = parsed.data;
+        const result = await deleteMessage(messageId, socket.user.id);
+        if (!result) {
+          return ack?.({ ok: false, error: 'Повідомлення не знайдено' });
+        }
+
+        const participantIds = await getConversationParticipantIds(result.conversationId);
+        const targetRooms = [
+          `conversation:${result.conversationId}`,
+          ...participantIds.map((id) => `user:${id}`),
+        ];
+        io.to(targetRooms).emit('message:deleted', {
+          conversationId: result.conversationId,
+          messageId,
+        });
+
+        ack?.({ ok: true });
+      } catch (err) {
+        console.error('message:delete error:', err);
         ack?.({ ok: false, error: 'Внутрішня помилка' });
       }
     });
@@ -507,6 +644,79 @@ export function setupSocket(io) {
         ack?.({ ok: true });
       } catch (err) {
         console.error('stranger:typing error:', err);
+        ack?.({ ok: false, error: 'Внутрішня помилка' });
+      }
+    });
+
+    // Toggle реакції на ефемерному повідомленні анонімного чату (in-memory стан сесії)
+    socket.on('stranger:react', (data, ack) => {
+      try {
+        const parsed = strangerReactionSchema.safeParse(data);
+        if (!parsed.success) {
+          return ack?.({ ok: false, error: parsed.error.issues[0].message });
+        }
+
+        const { sessionId, messageId, emoji } = parsed.data;
+        // null = «нічого не змінилось»: no-op або немає прав/повідомлення.
+        // Інтерпретуємо однаково (ok без розсилки), щоб подія не стала оракулом.
+        const result = setStrangerReaction(sessionId, socket.user.id, messageId, emoji || null);
+        if (result) {
+          io.to(`stranger:${sessionId}`).emit('stranger:reaction', {
+            sessionId,
+            messageId,
+            reactions: result.reactions,
+          });
+        }
+
+        ack?.({ ok: true });
+      } catch (err) {
+        console.error('stranger:react error:', err);
+        ack?.({ ok: false, error: 'Внутрішня помилка' });
+      }
+    });
+
+    // Редагування власного ефемерного повідомлення
+    socket.on('stranger:edit', (data, ack) => {
+      try {
+        const parsed = strangerEditSchema.safeParse(data);
+        if (!parsed.success) {
+          return ack?.({ ok: false, error: parsed.error.issues[0].message });
+        }
+
+        const { sessionId, messageId, body } = parsed.data;
+        const result = editStrangerMessage(sessionId, socket.user.id, messageId, body);
+        if (!result) {
+          return ack?.({ ok: false, error: 'Повідомлення не знайдено' });
+        }
+
+        io.to(`stranger:${sessionId}`).emit('stranger:updated', { message: result.message });
+
+        ack?.({ ok: true, message: result.message });
+      } catch (err) {
+        console.error('stranger:edit error:', err);
+        ack?.({ ok: false, error: 'Внутрішня помилка' });
+      }
+    });
+
+    // Tombstone-видалення власного ефемерного повідомлення
+    socket.on('stranger:delete', (data, ack) => {
+      try {
+        const parsed = strangerDeleteSchema.safeParse(data);
+        if (!parsed.success) {
+          return ack?.({ ok: false, error: parsed.error.issues[0].message });
+        }
+
+        const { sessionId, messageId } = parsed.data;
+        const result = deleteStrangerMessage(sessionId, socket.user.id, messageId);
+        if (!result) {
+          return ack?.({ ok: false, error: 'Повідомлення не знайдено' });
+        }
+
+        io.to(`stranger:${sessionId}`).emit('stranger:updated', { message: result.message });
+
+        ack?.({ ok: true, message: result.message });
+      } catch (err) {
+        console.error('stranger:delete error:', err);
         ack?.({ ok: false, error: 'Внутрішня помилка' });
       }
     });

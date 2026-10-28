@@ -118,7 +118,9 @@ function formatConversationRow(row) {
           body: row.last_message_body,
           senderId: row.last_message_sender_id,
           createdAt: row.last_message_created_at,
-          attachment: row.last_message_attachment_url
+          // Tombstone-прев'ю: клієнт покаже «Повідомлення видалено»
+          deleted: row.last_message_deleted_at != null,
+          attachment: row.last_message_attachment_url && row.last_message_deleted_at == null
             ? {
                 url: row.last_message_attachment_url,
                 type: row.last_message_attachment_type,
@@ -164,7 +166,8 @@ export async function getConversationForUser(conversationId, userId) {
        lm.attachment_type AS last_message_attachment_type,
        lm.attachment_name AS last_message_attachment_name,
        lm.attachment_size AS last_message_attachment_size,
-       lm.attachment_mime AS last_message_attachment_mime
+       lm.attachment_mime AS last_message_attachment_mime,
+       lm.deleted_at      AS last_message_deleted_at
      FROM conversations c
      JOIN conversation_participants my_p
        ON my_p.conversation_id = c.id AND my_p.user_id = $2
@@ -175,7 +178,7 @@ export async function getConversationForUser(conversationId, userId) {
      LEFT JOIN matches m
        ON m.conversation_id = c.id
      LEFT JOIN LATERAL (
-       SELECT msg.id, msg.body, msg.sender_id, msg.created_at,
+       SELECT msg.id, msg.body, msg.sender_id, msg.created_at, msg.deleted_at,
               msg.attachment_url, msg.attachment_type, msg.attachment_name,
               msg.attachment_size, msg.attachment_mime
          FROM messages msg
@@ -222,7 +225,8 @@ export async function listConversationsForUser(userId) {
        lm.attachment_type AS last_message_attachment_type,
        lm.attachment_name AS last_message_attachment_name,
        lm.attachment_size AS last_message_attachment_size,
-       lm.attachment_mime AS last_message_attachment_mime
+       lm.attachment_mime AS last_message_attachment_mime,
+       lm.deleted_at      AS last_message_deleted_at
      FROM conversations c
      JOIN conversation_participants my_p
        ON my_p.conversation_id = c.id AND my_p.user_id = $1
@@ -233,7 +237,7 @@ export async function listConversationsForUser(userId) {
      LEFT JOIN matches m
        ON m.conversation_id = c.id
      LEFT JOIN LATERAL (
-       SELECT msg.id, msg.body, msg.sender_id, msg.created_at,
+       SELECT msg.id, msg.body, msg.sender_id, msg.created_at, msg.deleted_at,
               msg.attachment_url, msg.attachment_type, msg.attachment_name,
               msg.attachment_size, msg.attachment_mime
          FROM messages msg
@@ -256,7 +260,11 @@ function formatMessageRow(row) {
     senderUsername: row.sender_username ?? null,
     body: row.body || '',
     createdAt: row.created_at,
-    attachment: row.attachment_url
+    // Мітка «редаговано» біля часу (null = не редагували)
+    editedAt: row.edited_at || null,
+    // Tombstone: тіло й вкладення очищені на сервері, клієнт показує «Повідомлення видалено»
+    deleted: row.deleted_at != null,
+    attachment: row.attachment_url && row.deleted_at == null
       ? {
           url: row.attachment_url,
           type: row.attachment_type,
@@ -265,7 +273,221 @@ function formatMessageRow(row) {
           mime: row.attachment_mime,
         }
       : null,
+    // Агрегат { emoji: { count, userIds } }: наповнюється attachReactions для сторінок,
+    // для нових message:send — початково порожній
+    reactions: formatReactionRows(row.reaction_rows),
   };
+}
+
+/**
+ * Швидкий набір реакцій контекстного меню. Оскільки там лише емодзі-рядок,
+ * сервер валідує payload за цим фіксованим списком.
+ */
+export const REACTION_EMOJIS = ['👍', '❤️', '😂', '😮', '😢', '🙏'];
+
+/**
+ * Збирає рядки message_reactions в агрегат { emoji: { count, userIds } }.
+ * Хіпси під бульбашкою показують кількість і підсвічують власну реакцію за userIds.
+ */
+function formatReactionRows(rows) {
+  const aggregate = {};
+  for (const row of rows || []) {
+    const { emoji, user_id: userId } = row;
+    if (!aggregate[emoji]) {
+      aggregate[emoji] = { count: 0, userIds: [] };
+    }
+    aggregate[emoji].count += 1;
+    aggregate[emoji].userIds.push(userId);
+  }
+  return aggregate;
+}
+
+/**
+ * Дозавантажує агрегат реакцій для сторінки повідомлень: один IN-запит
+ * на всі id сторінки дешевший за LATERAL-join на кожен рядок.
+ */
+async function attachReactions(pageRows) {
+  if (pageRows.length === 0) return;
+
+  const pageIds = pageRows.map((row) => row.id);
+  const { rows } = await query(
+    `SELECT message_id, user_id, emoji
+       FROM message_reactions
+      WHERE message_id = ANY($1::uuid[])`,
+    [pageIds],
+  );
+
+  const grouped = new Map();
+  for (const row of rows) {
+    if (!grouped.has(row.message_id)) grouped.set(row.message_id, []);
+    grouped.get(row.message_id).push(row);
+  }
+
+  for (const row of pageRows) {
+    row.reaction_rows = grouped.get(row.id) || [];
+  }
+}
+
+/**
+ * Повертає для повідомлення { conversationId, reactions } — учасник перевіряється
+ * через conversation_participants в умові WHERE, тож перебір чужих messageId
+ * неможливий. null = повідомлення не існує або я не учасник діалогу.
+ */
+async function getMessageWithReactions(messageId, userId) {
+  const { rows } = await query(
+    `SELECT m.conversation_id, r.emoji, r.user_id
+       FROM messages m
+       JOIN conversation_participants p
+         ON p.conversation_id = m.conversation_id AND p.user_id = $2
+       LEFT JOIN message_reactions r ON r.message_id = m.id
+      WHERE m.id = $1`,
+    [messageId, userId],
+  );
+  if (rows.length === 0) return null;
+  return {
+    conversationId: rows[0].conversation_id,
+    reactions: formatReactionRows(rows),
+  };
+}
+
+/**
+ * Ставить / прибирає реакцію користувача на повідомлення (toggle).
+ * Одна реакція на юзера на повідомлення: те саме емодзі — знімає, інше — замінює.
+ * emoji === null означає «зняти реакцію».
+ * Повертає { conversationId, reactions } або null, якщо зміни не було
+ * (повторний клік того ж емодзі / зняття відсутньої реакції / немає прав).
+ */
+export async function setMessageReaction(messageId, userId, emoji) {
+  // Політика приватності: перевірка учасника — в умові INSERT/WHERE,
+  // тож перебір чужих messageId не змінює чужі дані та повертає null.
+  const participantCondition = `
+    EXISTS (
+      SELECT 1
+        FROM messages m
+        JOIN conversation_participants p
+          ON p.conversation_id = m.conversation_id AND p.user_id = $2
+       WHERE m.id = $1
+    )`;
+
+  if (emoji) {
+    const { rows: changed } = await query(
+      `INSERT INTO message_reactions (message_id, user_id, emoji)
+       SELECT $1, $2, $3
+        WHERE ${participantCondition}
+      ON CONFLICT (message_id, user_id)
+           DO UPDATE SET emoji = EXCLUDED.emoji, created_at = now()
+           WHERE message_reactions.emoji <> EXCLUDED.emoji
+       RETURNING message_id`,
+      [messageId, userId, emoji],
+    );
+    if (changed.length === 0) return null;
+  } else {
+    const { rows: removed } = await query(
+      `DELETE FROM message_reactions
+        WHERE message_id = $1 AND user_id = $2 AND ${participantCondition}
+       RETURNING message_id`,
+      [messageId, userId],
+    );
+    if (removed.length === 0) return null;
+  }
+
+  return getMessageWithReactions(messageId, userId);
+}
+
+/**
+ * Редагує власне текстове повідомлення (лише відправник, лише не tombstone).
+ * Повертає свіжий об'єкт повідомлення (з edited_at) або null.
+ */
+export async function editMessage(messageId, userId, body) {
+  const { rows } = await query(
+    `UPDATE messages
+        SET body = $3, edited_at = now(), deleted_at = NULL
+      WHERE id = $1 AND sender_id = $2 AND deleted_at IS NULL
+      RETURNING id, conversation_id, sender_id, body, created_at, edited_at, deleted_at,
+                attachment_url, attachment_type, attachment_name, attachment_size, attachment_mime,
+                (SELECT username FROM users WHERE id = messages.sender_id) AS sender_username,
+                NULL::jsonb AS reaction_rows`,
+    [messageId, userId, body],
+  );
+  return rows[0] ? formatMessageRow(rows[0]) : null;
+}
+
+/**
+ * Tombstone-видалення власного повідомлення: очищає тіло й вкладення, ставить
+ * deleted_at. Реакції прибирає в тій самій транзакції. Розсильний (сокет) далі
+ * сам покаже tombstone клієнтам. Повертає { conversationId } або null.
+ */
+export async function deleteMessage(messageId, userId) {
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+
+    const { rows } = await client.query(
+      `UPDATE messages
+          SET deleted_at = now(), body = '', edited_at = NULL,
+              attachment_url = NULL, attachment_type = NULL, attachment_name = NULL,
+              attachment_size = NULL, attachment_mime = NULL
+        WHERE id = $1 AND sender_id = $2 AND deleted_at IS NULL
+        RETURNING conversation_id`,
+      [messageId, userId],
+    );
+    if (rows.length === 0) {
+      await client.query('ROLLBACK');
+      return null;
+    }
+
+    // Реакції на tombstone не мають сенсу — прибираємо атомарно з видаленням
+    await client.query('DELETE FROM message_reactions WHERE message_id = $1', [messageId]);
+
+    await client.query('COMMIT');
+    return { conversationId: rows[0].conversation_id };
+  } catch (err) {
+    await client.query('ROLLBACK');
+    throw err;
+  } finally {
+    client.release();
+  }
+}
+
+/**
+ * Пошук по тілах повідомлень у всіх діалогах користувача (tombstone не шукаємо).
+ * Підрядок, як і пошук людей: %/_ екрановані, щоб `%` у запиті не став wildcard.
+ * Повертає [{ message, otherUsername }] — клієнт за другим кликом відкриє діалог.
+ */
+export async function searchMessages(userId, queryStr, { limit = 20 } = {}) {
+  const escaped = queryStr.replace(/[\\%_]/g, '\\$&');
+  const { rows } = await query(
+    `SELECT m.id, m.conversation_id, m.sender_id, m.body, m.created_at, m.edited_at,
+            u.username AS sender_username,
+            other_u.username AS other_username
+       FROM messages m
+       JOIN conversation_participants my_p
+         ON my_p.conversation_id = m.conversation_id AND my_p.user_id = $1
+       JOIN conversation_participants other_p
+         ON other_p.conversation_id = m.conversation_id AND other_p.user_id <> $1
+       JOIN users other_u ON other_u.id = other_p.user_id
+       JOIN users u ON u.id = m.sender_id
+      WHERE m.deleted_at IS NULL
+        AND length(trim(COALESCE(m.body, ''))) > 0
+        AND m.body ILIKE '%' || $2 || '%' ESCAPE '\\'
+      ORDER BY m.created_at DESC, m.id DESC
+      LIMIT $3`,
+    [userId, escaped, limit],
+  );
+
+  return rows.map((row) => ({
+    message: {
+      id: row.id,
+      conversationId: row.conversation_id,
+      senderId: row.sender_id,
+      senderUsername: row.sender_username,
+      body: row.body,
+      createdAt: row.created_at,
+      editedAt: row.edited_at,
+    },
+    otherUsername: row.other_username,
+    senderId: row.sender_id,
+  }));
 }
 
 /**
@@ -291,6 +513,7 @@ export async function listMessages(conversationId, { limit = 50, before = null }
 
     const res = await query(
       `SELECT m.id, m.conversation_id, m.sender_id, m.body, m.created_at,
+              m.edited_at, m.deleted_at,
               m.attachment_url, m.attachment_type, m.attachment_name,
               m.attachment_size, m.attachment_mime,
               u.username AS sender_username
@@ -306,6 +529,7 @@ export async function listMessages(conversationId, { limit = 50, before = null }
   } else {
     const res = await query(
       `SELECT m.id, m.conversation_id, m.sender_id, m.body, m.created_at,
+              m.edited_at, m.deleted_at,
               m.attachment_url, m.attachment_type, m.attachment_name,
               m.attachment_size, m.attachment_mime,
               u.username AS sender_username
@@ -321,6 +545,9 @@ export async function listMessages(conversationId, { limit = 50, before = null }
 
   const hasMore = rows.length > limit;
   const pageRows = hasMore ? rows.slice(0, limit) : rows;
+
+  // Реакції сторінки одним агрегатним запитом (за id, порядок не важливий)
+  await attachReactions(pageRows);
 
   // Реверсимо в хронологічний порядок (найстаріші перші), зручно для клієнта
   pageRows.reverse();

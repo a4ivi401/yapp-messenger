@@ -7,6 +7,9 @@ import {
   leaveSession,
   requestContactMatch,
   saveStrangerMessage,
+  setStrangerReaction,
+  editStrangerMessage,
+  deleteStrangerMessage,
   getSession,
   hasSeenPartner,
   _resetStateForTesting,
@@ -131,5 +134,61 @@ test('stranger.js unit tests', async (t) => {
 
     // Active session is now converted/closed
     assert.equal(getSession(sessionId), null);
+  });
+
+  await t.test('ephemeral reaction toggle: same emoji removes, other replaces', () => {
+    findOrEnqueue({ id: 'u1', username: 'alice' }, 'sock1');
+    const { sessionId } = findOrEnqueue({ id: 'u2', username: 'bob' }, 'sock2');
+    saveStrangerMessage(sessionId, { id: 'm1', senderId: 'u2', body: 'привіт' });
+
+    const set = setStrangerReaction(sessionId, 'u1', 'm1', '👍');
+    assert.deepEqual(set.reactions['👍'].userIds, ['u1']);
+
+    assert.equal(setStrangerReaction(sessionId, 'u1', 'm1', '👍'), null);
+    const replaced = setStrangerReaction(sessionId, 'u1', 'm1', '❤️');
+    assert.equal(replaced.reactions['👍'], undefined);
+    assert.equal(replaced.reactions['❤️'].count, 1);
+
+    // Перший null знімає реакцію (повертає порожній агрегат), другий — no-op
+    const removed = setStrangerReaction(sessionId, 'u1', 'm1', null);
+    assert.deepEqual(removed.reactions, {});
+    assert.equal(setStrangerReaction(sessionId, 'u1', 'm1', null), null);
+  });
+
+  await t.test('ephemeral reaction: outsiders and deleted messages are rejected', () => {
+    findOrEnqueue({ id: 'u1', username: 'alice' }, 'sock1');
+    const { sessionId } = findOrEnqueue({ id: 'u2', username: 'bob' }, 'sock2');
+    saveStrangerMessage(sessionId, { id: 'm1', senderId: 'u2', body: 'привіт' });
+
+    assert.equal(setStrangerReaction(sessionId, 'u3', 'm1', '👍'), null);
+    assert.equal(setStrangerReaction(sessionId, 'u1', 'missing', '👍'), null);
+
+    const { message } = deleteStrangerMessage(sessionId, 'u2', 'm1');
+    assert.equal(message.deleted, true);
+    assert.equal(setStrangerReaction(sessionId, 'u1', 'm1', '👍'), null);
+  });
+
+  await t.test('ephemeral edit/delete: only the sender can act', () => {
+    findOrEnqueue({ id: 'u1', username: 'alice' }, 'sock1');
+    const { sessionId } = findOrEnqueue({ id: 'u2', username: 'bob' }, 'sock2');
+    saveStrangerMessage(sessionId, { id: 'm1', senderId: 'u1', body: 'перше' });
+    saveStrangerMessage(sessionId, { id: 'm2', senderId: 'u1', body: 'друге' });
+
+    // чужий не редагує і не видаляє
+    assert.equal(editStrangerMessage(sessionId, 'u2', 'm1', 'зламано'), null);
+    assert.equal(deleteStrangerMessage(sessionId, 'u2', 'm1'), null);
+
+    const edited = editStrangerMessage(sessionId, 'u1', 'm1', 'ось так');
+    assert.equal(edited.message.body, 'ось так');
+    assert.ok(edited.message.editedAt);
+
+    const deleted = deleteStrangerMessage(sessionId, 'u1', 'm2');
+    assert.equal(deleted.message.deleted, true);
+    assert.equal(deleted.message.body, '');
+    assert.equal(deleted.message.attachment, null);
+
+    // Tombstone зберігається і в буфері сесії
+    const session = getSession(sessionId);
+    assert.equal(session.messages.find((m) => m.id === 'm2').deleted, true);
   });
 });

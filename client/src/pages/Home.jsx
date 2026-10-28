@@ -36,6 +36,8 @@ function formatFileSize(bytes) {
 
 function formatMessagePreview(lastMessage, fallback = 'Немає повідомлень') {
   if (!lastMessage) return fallback;
+  // Tombstone (власне видалення повідомлення): фіксований текст замість тіла
+  if (lastMessage.deleted) return 'Повідомлення видалено';
   if (lastMessage.body && lastMessage.body.trim()) {
     if (lastMessage.attachment) {
       const prefix = lastMessage.attachment.type === 'image' ? '📷 ' : '📎 ';
@@ -59,6 +61,13 @@ const TYPING_HIDE_MS = 4000; // стільки показуємо «друкує
 
 const TICK_GLYPH = { sent: '✓', delivered: '✓✓', read: '✓✓' };
 const TICK_TITLE = { sent: 'Надіслано', delivered: 'Доставлено', read: 'Прочитано' };
+
+// Емодзі-рядок реакцій у контекстному меню (дзеркало REACTION_EMOJIS на сервері)
+const REACTION_EMOJIS = ['👍', '❤️', '😂', '😮', '😢', '🙏'];
+
+// Приблизні габарити меню (клампінг позиції до країв вікна)
+const CONTEXT_MENU_W = 240;
+const CONTEXT_MENU_H = 260;
 
 function laterIso(a, b) {
   if (!a) return b || null;
@@ -146,6 +155,16 @@ export default function Home() {
   const [messages, setMessages] = useState([]);
   const [inputText, setInputText] = useState('');
   const [isLoadingMessages, setIsLoadingMessages] = useState(false);
+
+  // Контекстне меню повідомлення: { msg, x, y } | null. Позиція вже обрізана до вікна.
+  const [contextMenu, setContextMenu] = useState(null);
+  // Режим редагування: id повідомлення, що редагується (null = звичайне надсилання)
+  const [editingMessageId, setEditingMessageId] = useState(null);
+  const editingMessageIdRef = useRef(null);
+
+  // Результати пошуку по тілах повідомлень та по контактах (день 10)
+  const [searchMessageResults, setSearchMessageResults] = useState([]);
+  const [searchContacts, setSearchContacts] = useState([]);
 
   // Прикріплення медіа (файл/фото)
   const [stagedAttachment, setStagedAttachment] = useState(null);
@@ -239,8 +258,36 @@ export default function Home() {
   useEffect(() => {
     setStagedAttachment(null);
     setUploadError(null);
+    setContextMenu(null);
+    if (editingMessageIdRef.current) {
+      setEditingMessageId(null);
+      editingMessageIdRef.current = null;
+      // Скидання قبل першого рендеру нового чата — inputText чиститься вручну нижче
+      setInputText('');
+    }
     if (fileInputRef.current) fileInputRef.current.value = '';
   }, [activeChat?.id]);
+
+  // Закриття контекстного меню: Esc, клік будь-де, скрол чата.
+  // Внутрішні кліки меню зупиняються stopPropagation, тож глобальний mousedown їх не бачить.
+  useEffect(() => {
+    if (!contextMenu) return undefined;
+
+    const onKeyDown = (e) => {
+      if (e.key === 'Escape') setContextMenu(null);
+    };
+    const onMouseDown = () => setContextMenu(null);
+    const onScroll = () => setContextMenu(null);
+
+    window.addEventListener('keydown', onKeyDown);
+    window.addEventListener('mousedown', onMouseDown);
+    window.addEventListener('wheel', onScroll, { passive: true });
+    return () => {
+      window.removeEventListener('keydown', onKeyDown);
+      window.removeEventListener('mousedown', onMouseDown);
+      window.removeEventListener('wheel', onScroll);
+    };
+  }, [contextMenu]);
 
   // Зливає присутність із REST-відповідей у live-мапу.
   // Потрібно після перепідключення: сервер міг перезапуститися, і в мапі
@@ -678,6 +725,107 @@ export default function Home() {
     });
 
     // ==========================================
+    // Реакції та правки повідомлень (день 10)
+    // ==========================================
+
+    // Агрегат реакцій конкретного повідомлення (toggle сервера вже відбувся)
+    const applyReactionUpdate = (chatId, messageId, reactions) => {
+      if (activeChatRef.current?.id !== chatId) return;
+      setMessages((prev) =>
+        prev.map((m) => (m.id === messageId ? { ...m, reactions } : m)),
+      );
+    };
+
+    socket.on('message:reaction', ({ conversationId, messageId, reactions }) => {
+      if (conversationId && messageId && reactions) {
+        applyReactionUpdate(conversationId, messageId, reactions);
+      }
+    });
+
+    socket.on('stranger:reaction', ({ sessionId, messageId, reactions }) => {
+      if (sessionId && messageId && reactions) {
+        applyReactionUpdate(sessionId, messageId, reactions);
+      }
+    });
+
+    // Редагування (edited_at) і tombstone: замінюємо локальний об'єкт повідомлення.
+    // Сайдбар-прев'ю оновлюємо теж — відредаговане тіло впливає на його текст.
+    const applyMessageUpdate = (message) => {
+      if (!message) return;
+
+      if (activeChatRef.current?.id === message.conversationId) {
+        setMessages((prev) =>
+          prev.some((m) => m.id === message.id)
+            ? prev.map((m) => (m.id === message.id ? message : m))
+            : prev,
+        );
+      }
+
+      setConversations((prev) =>
+        prev.map((conv) => {
+          if (conv.lastMessage?.id !== message.id) return conv;
+          return {
+            ...conv,
+            lastMessage: {
+              ...conv.lastMessage,
+              body: message.body,
+              deleted: Boolean(message.deleted),
+              attachment: message.attachment,
+            },
+          };
+        }),
+      );
+    };
+
+    socket.on('message:updated', ({ message }) => applyMessageUpdate(message));
+
+    // Tombstone (видалення): клієнт сам збирає tombstone — подія несе лише id
+    const applyMessageDelete = (conversationId, messageId) => {
+      if (activeChatRef.current?.id === conversationId) {
+        setMessages((prev) =>
+          prev.map((m) =>
+            m.id === messageId
+              ? { ...m, body: '', attachment: null, deleted: true, editedAt: null, reactions: {} }
+              : m,
+          ),
+        );
+      }
+
+      setConversations((prev) =>
+        prev.map((conv) => {
+          if (conv.lastMessage?.id !== messageId) return conv;
+          return {
+            ...conv,
+            lastMessage: {
+              ...conv.lastMessage,
+              body: '',
+              attachment: null,
+              deleted: true,
+            },
+          };
+        }),
+      );
+    };
+
+    socket.on('message:deleted', ({ conversationId, messageId }) => {
+      if (conversationId && messageId) applyMessageDelete(conversationId, messageId);
+    });
+
+    socket.on('stranger:updated', ({ message }) => {
+      if (!message) return;
+      const chat = activeChatRef.current;
+      const sameChat =
+        chat?.id === message.sessionId || strangerSessionRef.current?.sessionId === message.sessionId;
+      if (!sameChat) return;
+
+      setMessages((prev) =>
+        prev.some((m) => m.id === message.id)
+          ? prev.map((m) => (m.id === message.id ? message : m))
+          : prev,
+      );
+    });
+
+    // ==========================================
     // Випадковий анонімний співрозмовник (Stranger)
     // ==========================================
 
@@ -951,17 +1099,41 @@ export default function Home() {
     return () => clearInterval(timer);
   }, [headerIsOffline, activeChat?.type, activeChat?.id]);
 
-  // Глобальний пошук користувачів із дебаунсом 250 мс
+  // Глобальний пошук користувачів із дебаунсом 250 мс: люди + тіла
+  // повідомлень у всіх діалогах + фільтр контактів (день 10)
   useEffect(() => {
     const clean = searchQuery.trim().replace(/^@+/, '');
     if (!clean) {
       setSearchResults([]);
+      setSearchMessageResults([]);
+      setSearchContacts([]);
       setIsSearching(false);
       return;
     }
 
     setIsSearching(true);
     const timeout = setTimeout(() => {
+      // Контакти тягнемо цілком і фільтруємо клієнтськи: список малий,
+      // а вважати окремий ІЛайк для нього на сервері зайвий ендпоінт
+      const messagesPromise = api
+        .searchMessages(searchQuery.trim())
+        .then((res) => res.messages || [])
+        .catch((err) => {
+          console.error('Message search error:', err);
+          return [];
+        });
+      const contactsPromise = api
+        .listContacts()
+        .then((res) =>
+          (res.contacts || []).filter((c) =>
+            (c.username || '').toLowerCase().includes(clean.toLowerCase()),
+          ),
+        )
+        .catch((err) => {
+          console.error('Contacts search error:', err);
+          return [];
+        });
+
       api
         .searchUsers(clean)
         .then((res) => {
@@ -970,10 +1142,11 @@ export default function Home() {
         })
         .catch((err) => {
           console.error('Search error:', err);
-        })
-        .finally(() => {
-          setIsSearching(false);
         });
+
+      messagesPromise.then(setSearchMessageResults);
+      contactsPromise.then(setSearchContacts);
+      setIsSearching(false);
     }, 250);
 
     return () => clearTimeout(timeout);
@@ -1020,6 +1193,38 @@ export default function Home() {
     } catch (err) {
       console.error('Failed to add contact:', err);
     }
+  };
+
+  // Клік по результату пошуку в повідомленнях: відкрити той діалог
+  const openFromMessageResult = async (item) => {
+    const convId = item.message.conversationId;
+    const existing = conversations.find((c) => c.id === convId);
+    if (existing) {
+      openDirectConversation(existing);
+      setSearchQuery('');
+      return;
+    }
+
+    try {
+      const res = await api.getConversation(convId);
+      if (res.conversation) {
+        setConversations((prev) => {
+          if (prev.some((c) => c.id === res.conversation.id)) return prev;
+          return [res.conversation, ...prev];
+        });
+        openDirectConversation(res.conversation);
+      }
+    } catch (err) {
+      console.error('Failed to open conversation from search:', err);
+    } finally {
+      setSearchQuery('');
+    }
+  };
+
+  // Захід у чат із контакту в результатах пошуку
+  // (контакт не обов'язково має діалог — тоді він створиться)
+  const openFromContactResult = (contact) => {
+    handleSelectFoundUser({ id: contact.id, username: contact.username });
   };
 
   // Введення тексту: оновлює поле і сигналізує співрозмовнику «друкує…»
@@ -1126,11 +1331,120 @@ export default function Home() {
     const attachment = stagedAttachment;
     if ((!text && !attachment) || !activeChat || isUploadingAttachment) return;
 
+    // Режим редагування: подія message:edit / stranger:edit замість нового повідомлення
+    if (editingMessageIdRef.current) {
+      const messageId = editingMessageIdRef.current;
+      setEditingMessageId(null);
+      editingMessageIdRef.current = null;
+      setInputText('');
+
+      const socketFn = activeChat.type === 'stranger' ? 'stranger:edit' : 'message:edit';
+      const payload =
+        activeChat.type === 'stranger'
+          ? {
+              sessionId: strangerSessionRef.current?.sessionId || activeChat.id,
+              messageId,
+              body: text,
+            }
+          : { messageId, body: text };
+
+      if (socketRef.current?.connected) {
+        socketRef.current.emit(socketFn, payload, (res) => {
+          if (!res?.ok) {
+            console.error('Failed to edit message:', res?.error);
+          }
+        });
+      }
+      return;
+    }
+
     setInputText('');
     setStagedAttachment(null);
     setUploadError(null);
     if (fileInputRef.current) fileInputRef.current.value = '';
     dispatchMessage(text, attachment);
+  };
+
+  // ============ Контекстне меню, реакції, редагування/видалення (день 10) ============
+
+  // Відкриття меню на повідомленні: позиція обрізається до країв вікна
+  const handleOpenContextMenu = (e, msg) => {
+    if (msg.type === 'system' || msg.deleted) return; // tombstone та системні — без дій
+    e.preventDefault();
+    const x = Math.min(e.clientX, window.innerWidth - CONTEXT_MENU_W - 8);
+    const y = Math.min(e.clientY, window.innerHeight - CONTEXT_MENU_H - 8);
+
+    setContextMenu({ msg, x, y });
+  };
+
+  const closeContextMenu = () => setContextMenu(null);
+
+  const cancelEditMessage = () => {
+    setEditingMessageId(null);
+    editingMessageIdRef.current = null;
+    setInputText('');
+  };
+
+  const isMessageMine = (msg) => msg.senderId === user.id;
+
+  // Toggle реакції з чипса: своя реакція — знімаємо, чужа/відсутня — ставимо
+  const dispatchToggleReaction = (msg, emoji, isMine) => {
+    if (!activeChat) return;
+    const socketFn = activeChat.type === 'stranger' ? 'stranger:react' : 'message:react';
+    const idPayload =
+      activeChat.type === 'stranger'
+        ? { sessionId: strangerSessionRef.current?.sessionId || activeChat.id, messageId: msg.id }
+        : { messageId: msg.id };
+    if (socketRef.current?.connected) {
+      socketRef.current.emit(socketFn, { ...idPayload, emoji: isMine ? null : emoji }, (res) => {
+        if (!res?.ok) console.error('Failed to toggle reaction:', res?.error);
+      });
+    }
+  };
+
+  // Дія з меню: реакція / копіювання / редагування / видалення
+  const handleMenuAction = (action, emoji) => {
+    if (!contextMenu) return;
+    const msg = contextMenu.msg;
+    closeContextMenu();
+
+    if (action === 'react') {
+      dispatchToggleReaction(msg, emoji, Boolean(msg.reactions?.[emoji]?.userIds?.includes(user.id)));
+      return;
+    }
+
+    if (action === 'copy') {
+      // navigator.clipboard вимагає secure context; fallback — ручне виділення
+      if (navigator.clipboard?.writeText) {
+        navigator.clipboard.writeText(msg.body).catch(() => {});
+      } else {
+        window.prompt('Скопіюйте текст повідомлення:', msg.body);
+      }
+      return;
+    }
+
+    if (action === 'edit') {
+      setEditingMessageId(msg.id);
+      editingMessageIdRef.current = msg.id;
+      setInputText(msg.body);
+      return;
+    }
+
+    if (action === 'delete') {
+      const socketFn = activeChat.type === 'stranger' ? 'stranger:delete' : 'message:delete';
+      const idPayload =
+        activeChat.type === 'stranger'
+          ? {
+              sessionId: strangerSessionRef.current?.sessionId || activeChat.id,
+              messageId: msg.id,
+            }
+          : { messageId: msg.id };
+      if (socketRef.current?.connected) {
+        socketRef.current.emit(socketFn, idPayload, (res) => {
+          if (!res?.ok) console.error('Failed to delete message:', res?.error);
+        });
+      }
+    }
   };
 
   // ============ Голосові повідомлення (день 9) ============
@@ -1357,7 +1671,7 @@ export default function Home() {
             <span className="search-icon">🔍</span>
             <input
               type="text"
-              placeholder="Пошук людей та діалогів"
+              placeholder="Пошук людей, діалогів та повідомлень"
               value={searchQuery}
               onChange={(e) => setSearchQuery(e.target.value)}
             />
@@ -1440,6 +1754,82 @@ export default function Home() {
                           <div className="chat-row-line2">
                             <span className="chat-row-preview">
                               {formatMessagePreview(conv.lastMessage, 'Діалог створено')}
+                            </span>
+                          </div>
+                        </div>
+                      </button>
+                    );
+                  })}
+                </>
+              )}
+
+              {searchContacts.length > 0 && (
+                <>
+                  <div className="search-section-header">Контакти</div>
+                  {searchContacts.map((contact) => {
+                    const initials = (contact.username || '').slice(0, 2).toUpperCase();
+                    const isActive = activeChat?.otherUser?.id === contact.id;
+                    return (
+                      <div
+                        key={contact.id}
+                        className={`chat-row ${isActive ? 'active' : ''}`}
+                        onClick={() => openFromContactResult(contact)}
+                        style={{ cursor: 'pointer' }}
+                      >
+                        <div className="chat-row-avatar">
+                          {initials}
+                          {presenceOf(contact, presence).isOnline && (
+                            <span className="presence-dot" aria-label="У мережі" />
+                          )}
+                        </div>
+                        <div className="chat-row-body">
+                          <div className="chat-row-line1">
+                            <span className="chat-row-name">@{contact.username}</span>
+                            <span className="chat-row-badge">Контакт</span>
+                          </div>
+                          <div className="chat-row-line2">
+                            <span className="chat-row-preview">Натисніть, щоб відкрити діалог</span>
+                          </div>
+                        </div>
+                      </div>
+                    );
+                  })}
+                </>
+              )}
+
+              {searchMessageResults.length > 0 && (
+                <>
+                  <div className="search-section-header">З повідомлень</div>
+                  {searchMessageResults.map((item) => {
+                    const initials = (item.otherUsername || '')
+                      .slice(0, 2)
+                      .toUpperCase();
+                    const body = item.message.body || '';
+                    const snippet =
+                      body.length > 80 ? `${body.slice(0, 80)}…` : body;
+                    const senderLabel =
+                      item.message.senderId === user.id
+                        ? 'Ви'
+                        : `@${item.message.senderUsername || 'співрозмовник'}`;
+                    return (
+                      <button
+                        key={item.message.id}
+                        className="chat-row search-message-row"
+                        onClick={() => openFromMessageResult(item)}
+                        title="Натисніть, щоб відкрити діалог"
+                      >
+                        <div className="chat-row-avatar">{initials}</div>
+                        <div className="chat-row-body">
+                          <div className="chat-row-line1">
+                            <span className="chat-row-name">@{item.otherUsername}</span>
+                            <span className="chat-row-time">
+                              {formatTimestamp(item.message.createdAt)}
+                            </span>
+                          </div>
+                          <div className="chat-row-line2">
+                            <span className="chat-row-preview">
+                              <span className="search-message-sender">{senderLabel}: </span>
+                              {snippet}
                             </span>
                           </div>
                         </div>
@@ -1724,6 +2114,7 @@ export default function Home() {
                         <div
                           key={msg.id}
                           className={`message-row ${isMe ? 'message-out' : 'message-in'}`}
+                          onContextMenu={(e) => handleOpenContextMenu(e, msg)}
                         >
                           <div className="message-bubble">
                             {activeChat.type === 'stranger' && !isMe && msg.senderAnonName && (
@@ -1796,12 +2187,18 @@ export default function Home() {
                                 )}
                               </div>
                             )}
-                            {msg.body && msg.body.trim() && (
+                            {!msg.deleted && msg.body && msg.body.trim() && (
                               <div className="message-text">{msg.body}</div>
+                            )}
+                            {msg.deleted && (
+                              <div className="message-text is-deleted">Повідомлення видалено</div>
                             )}
                             <div className="message-meta">
                               <span className="message-time">
                                 {formatTimestamp(msg.createdAt)}
+                                {msg.editedAt && !msg.deleted && (
+                                  <span className="message-edited"> · редаговано</span>
+                                )}
                               </span>
                               {tickStatus && (
                                 <span
@@ -1814,6 +2211,31 @@ export default function Home() {
                               )}
                             </div>
                           </div>
+                          {/* Чипси реакцій під бульбашкою (агрегат із сервера) */}
+                          {msg.reactions && Object.keys(msg.reactions).length > 0 && (
+                            <div className="message-reactions">
+                              {Object.entries(msg.reactions).map(
+                                ([emoji, { count, userIds }]) => {
+                                  const isMine = userIds.includes(user.id);
+                                  return (
+                                    <button
+                                      key={emoji}
+                                      type="button"
+                                      className={`message-reaction-chip ${isMine ? 'is-mine' : ''}`}
+                                      title={isMine ? 'Прибрати реакцію' : 'Поставити таку саму'}
+                                      onClick={(e) => {
+                                        e.stopPropagation();
+                                        dispatchToggleReaction(msg, emoji, isMine);
+                                      }}
+                                    >
+                                      {emoji}
+                                      {count > 1 ? ` ${count}` : ''}
+                                    </button>
+                                  );
+                                },
+                              )}
+                            </div>
+                          )}
                         </div>
                       );
                     })
@@ -1920,7 +2342,23 @@ export default function Home() {
                         onCancel={handleVoiceCancel}
                       />
                     ) : (
-                      <form className="chat-input-bar" onSubmit={handleSendMessage}>
+                      <>
+                        {/* Рядок-підказка режиму редагування */}
+                        {editingMessageId && (
+                          <div className="edit-mode-bar">
+                            <span>✏️ Редагування — Enter, щоб зберегти</span>
+                            <button
+                              type="button"
+                              className="staging-clear-btn"
+                              onClick={cancelEditMessage}
+                              title="Скасувати редагування"
+                              aria-label="Скасувати редагування"
+                            >
+                              ✕
+                            </button>
+                          </div>
+                        )}
+                        <form className="chat-input-bar" onSubmit={handleSendMessage}>
                         <input
                           ref={fileInputRef}
                           type="file"
@@ -1932,7 +2370,7 @@ export default function Home() {
                           className="attach-btn"
                           title="Прикріпити медіа або файл"
                           onClick={() => fileInputRef.current?.click()}
-                          disabled={isUploadingAttachment}
+                          disabled={isUploadingAttachment || Boolean(editingMessageId)}
                         >
                           📎
                         </button>
@@ -1942,16 +2380,18 @@ export default function Home() {
                           title="Голосове повідомлення"
                           aria-label="Записати голосове повідомлення"
                           onClick={handleMicClick}
-                          disabled={isSendingVoice}
+                          disabled={isSendingVoice || Boolean(editingMessageId)}
                         >
                           🎤
                         </button>
                         <input
                           type="text"
                           placeholder={
-                            stagedAttachment
-                              ? 'Додайте підпис або надішліть...'
-                              : 'Напишіть повідомлення...'
+                            editingMessageId
+                              ? 'Редагуєте повідомлення...'
+                              : stagedAttachment
+                                ? 'Додайте підпис або надішліть...'
+                                : 'Напишіть повідомлення...'
                           }
                           value={inputText}
                           onChange={handleInputChange}
@@ -1967,7 +2407,8 @@ export default function Home() {
                             <path d="M2.01 21L23 12 2.01 3 2 10l15 2-15 2z" />
                           </svg>
                         </button>
-                      </form>
+                        </form>
+                      </>
                     )}
                   </>
                 )}
@@ -2080,6 +2521,59 @@ export default function Home() {
               </a>
             </div>
           </div>
+        </div>
+      )}
+      {/* КОНТЕКСТНЕ МЕНЮ ПОВІДОМЛЕННЯ (right-click) */}
+      {contextMenu && (
+        <div
+          className="context-menu"
+          style={{ left: contextMenu.x, top: contextMenu.y }}
+          onClick={(e) => e.stopPropagation()}
+          onContextMenu={(e) => {
+            e.preventDefault();
+            e.stopPropagation();
+            setContextMenu(null);
+          }}
+        >
+          <div className="context-menu-actions">
+            {REACTION_EMOJIS.map((emoji) => {
+              const isMine = Boolean(
+                contextMenu.msg.reactions?.[emoji]?.userIds?.includes(user.id),
+              );
+              return (
+                <button
+                  key={emoji}
+                  type="button"
+                  className={`context-menu-reaction ${isMine ? 'is-mine' : ''}`}
+                  onClick={() => handleMenuAction('react', emoji)}
+                  title={isMine ? 'Прибрати реакцію' : 'Поставити реакцію'}
+                >
+                  {emoji}
+                </button>
+              );
+            })}
+          </div>
+          <button type="button" className="context-menu-item" onClick={() => handleMenuAction('copy')}>
+            📋 Копіювати
+          </button>
+          {isMessageMine(contextMenu.msg) && contextMenu.msg.body?.trim() && (
+            <button
+              type="button"
+              className="context-menu-item"
+              onClick={() => handleMenuAction('edit')}
+            >
+              ✏️ Редагувати
+            </button>
+          )}
+          {isMessageMine(contextMenu.msg) && (
+            <button
+              type="button"
+              className="context-menu-item is-danger"
+              onClick={() => handleMenuAction('delete')}
+            >
+              🗑 Видалити
+            </button>
+          )}
         </div>
       )}
     </div>

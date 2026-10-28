@@ -6,6 +6,7 @@ import cookieParser from 'cookie-parser';
 import { Server } from 'socket.io';
 import { authRouter } from './routes/auth.js';
 import { conversationsRouter } from './routes/conversations.js';
+import { messagesRouter } from './routes/messages.js';
 import { contactsRouter } from './routes/contacts.js';
 import { matchesRouter } from './routes/matches.js';
 import { usersRouter } from './routes/users.js';
@@ -31,6 +32,7 @@ app.get('/health', async (_req, res) => {
 app.use(attachUser);
 app.use('/api/auth', authRouter);
 app.use('/api/conversations', conversationsRouter);
+app.use('/api/messages', messagesRouter);
 app.use('/api/contacts', contactsRouter);
 app.use('/api/matches', matchesRouter);
 app.use('/api/users', usersRouter);

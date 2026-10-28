@@ -28,6 +28,8 @@ A messenger where you can chat with a random stranger, and if a **match** happen
 | Random anonymous chat, session exclusion & mutual match | ✅ done |
 | Message statuses «✓ sent → ✓✓ delivered → ✓✓ read» and "typing…" indicator (Socket.IO) | ✅ done |
 | Media / voice messages | ✅ done |
+| Emoji reactions (1 user × 1 emoji) + context menu: copy / edit / delete (Socket.IO) | ✅ done |
+| Search across message bodies in all chats + contacts filter in search results | ✅ done |
 
 ## Roadmap (2 weeks · ~2 h/day ≈ 28 h)
 
@@ -38,7 +40,7 @@ A messenger where you can chat with a random stranger, and if a **match** happen
 | **M0** | Project skeleton + auth | 1 | ✅ done |
 | **M1** | Live chat — the messenger core | 2–4 | ✅ done |
 | **M2** | Random stranger + matching (**twist**) | 5–6 | ✅ done |
-| **M3** | Statuses, media & extras | 7–11 | 🚧 7–9 ✅ · 10–11 planned |
+| **M3** | Statuses, media & extras | 7–11 | 🚧 7–10 ✅ · 11 planned |
 | **M4** | Deployment & defense prep | 12–14 | 🎯 planned |
 
 ### 📅 Day-by-day
@@ -56,7 +58,7 @@ Priority legend: 🟣 **core** (can't pass without it) · ⚪ **leftover** (only
 | **7** ✅ | "Delivered / read" statuses + "typing…" indicator + real presence ("online" / "last seen …"): watermark model on `conversation_participants` (migration 005), `users.last_seen_at` (migration 006), `conversation:read`, `message:delivered`, `typing`, `presence:update` events; the "🎲 Match" badge was removed from the chat list and header (it will return as a separate accent) | 🟣 minimum |
 | **8** ✅ | Media: photos & files (`multer`, `uploads` volume), image previews, modal lightbox, secure storage & downloads | ⚪ |
 | **9** ✅ | Voice messages: MediaRecorder recording with a live waveform, auto-send, player with a real waveform (WebAudio), seek, microphone permission handling | ⚪ |
-| **10** | Edit / delete messages + search across chats and contacts | ⚪ |
+| **10** ✅ | Emoji reactions (1 user × 1 emoji, toggle, realtime in permanent and anonymous chats) + right-click context menu: reactions / copy / edit / tombstone delete + search across message bodies in all chats and a contacts filter in search results | ⚪ |
 | **11** | Block / report in the anonymous chat + basic rate limiting | ⚪ |
 | **12** | Responsive polish: empty states, errors, Ukrainian zod messages | 🟣 polish |
 | **13** | Deployment (Railway / Fly), HTTPS, secure cookies, env vars | 🟣 |
@@ -76,7 +78,7 @@ Priority legend: 🟣 **core** (can't pass without it) · ⚪ **leftover** (only
 **⚪ Leftover time** (add in this order, if time remains):
 1. Photos / files ✅
 2. Voice messages ✅
-3. Edit / delete + search
+3. Edit / delete + reactions + search across chats and contacts ✅
 4. Block / report + rate limiting
 5. Dark theme
 
@@ -147,6 +149,7 @@ Open **http://localhost:5173**. (Kill the docker stack first if ports are taken:
 | GET | `/api/matches` | user's mutual match history `{ matches }` |
 | GET | `/api/matches/stats` | aggregated user stats `{ matchesCount, contactsCount }` |
 | GET | `/api/users/search?q=...` | global user search by username substring with `isContact` flag |
+| GET | `/api/messages/search?q=...` | search across message bodies in all of the user's conversations (substring, tombstones excluded) |
 | POST | `/api/uploads` | `multipart/form-data` with `file` field — upload photo, file or voice message (voice.webm/.ogg/.m4a, up to 100 MB); returns `{ attachment: { url, type, name, size, mime } }` |
 | GET | `/api/uploads/files/:filename` | direct media file delivery with `Cache-Control: immutable` and `X-Content-Type-Options: nosniff` |
 | GET | `/api/uploads/download/:filename?name=...` | secure file download preserving original filename (`Content-Disposition: attachment`) |
@@ -185,6 +188,9 @@ Upon connection, each authenticated user automatically joins their own private r
 | `conversation:read` | `{ conversationId }` | `{ ok: true }` | Mark all incoming messages of the conversation as read (lifts the watermark) and notify the partner via `message:read`. Repeating with no new incoming messages is a no-op with no broadcast |
 | `message:delivered` | `{ messageId }` | `{ ok: true }` | Delivery acknowledgement from the recipient; the sender receives `message:delivered` |
 | `typing` | `{ conversationId, isTyping }` | `{ ok: true }` or `{ ok: false, error }` | "Typing…" indicator in a direct chat. The server only relays the event (stateless); starts are throttled to 500 ms per recipient |
+| `message:react` | `{ messageId, emoji }` | `{ ok: true }` | Toggle a reaction (emoji from the fixed set 👍❤️😂😮😢🙏, `null` removes it). One reaction per user per message; broadcasts `message:reaction` with the aggregate |
+| `message:edit` | `{ messageId, body }` | `{ ok: true, message }` | Edit own text message (≤ 4000 characters); broadcasts `message:updated` with `editedAt` |
+| `message:delete` | `{ messageId }` | `{ ok: true }` | Tombstone-delete own message (body/attachment are cleared); broadcasts `message:deleted` |
 | `stranger:typing` | `{ sessionId, isTyping }` | `{ ok: true }` or `{ ok: false, error }` | Same for the anonymous chat |
 | `stranger:search` | — | `{ ok: true, status }` | Start searching for a random stranger or enter the FIFO queue |
 | `stranger:cancel` | — | `{ ok: true }` | Cancel search and remove from queue |
@@ -192,6 +198,9 @@ Upon connection, each authenticated user automatically joins their own private r
 | `stranger:next` | — | `{ ok: true, status }` | Skip current stranger («🎲 Next»): record session exclusion to prevent re-matching and search for a new partner |
 | `stranger:leave` | — | `{ ok: true }` | Leave stranger chat and mark mutual exclusion in session |
 | `stranger:match-request` | `{ sessionId }` | `{ ok: true, mutual }` | Send contact request («🤝 Add to contacts»). When mutual, saves messages to DB and reveals identities |
+| `stranger:react` | `{ sessionId, messageId, emoji }` | `{ ok: true }` | Toggle a reaction in the anonymous chat (in-memory session state); broadcasts `stranger:reaction` |
+| `stranger:edit` | `{ sessionId, messageId, body }` | `{ ok: true, message }` | Edit own ephemeral message; broadcasts `stranger:updated` |
+| `stranger:delete` | `{ sessionId, messageId }` | `{ ok: true, message }` | Tombstone-delete own ephemeral message; broadcasts `stranger:updated` |
 
 #### Server Events (Server → Client)
 
@@ -210,6 +219,11 @@ Upon connection, each authenticated user automatically joins their own private r
 | `contact:new` | `{ contact }` | New contact added to user's list after mutual match |
 | `match:new` | `{ match }` | Realtime notification of newly recorded match to sync counters immediately |
 | `presence:update` | `{ userId, isOnline, lastSeenAt }` | User presence state change (connected / disconnected). Broadcast only to direct chat partners and contacts (privacy boundary) |
+| `message:reaction` | `{ conversationId, messageId, reactions }` | Reaction aggregate `{ emoji: { count, userIds } }` after a toggle. Sent to the conversation room and participants' private rooms |
+| `message:updated` | `{ message }` | Message was edited (`editedAt` set) — the client replaces its local copy |
+| `message:deleted` | `{ conversationId, messageId }` | Message tombstoned: the client builds the tombstone locally from the lightweight payload |
+| `stranger:reaction` | `{ sessionId, messageId, reactions }` | Reaction aggregate of an ephemeral message after a toggle |
+| `stranger:updated` | `{ message }` | Ephemeral message edited or tombstone-deleted in the anonymous chat |
 
 ## Structure
 

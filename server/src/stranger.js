@@ -144,6 +144,100 @@ export function saveStrangerMessage(sessionId, message) {
   return true;
 }
 
+// ── Ephemeral-дії над повідомленнями анонімного чату (день 10) ──────────────
+// Стан живе на об'єкті сесії (session.reactions), тому повністю зникає разом із
+// нею — на next/leave/disconnect нічого прибиарти окремо не треба.
+
+/**
+ * Збирає мапу реакцій повідомлення у агрегат { emoji: { count, userIds } } —
+ * ту саму форму, яку віддає БД-версія для постійних чатів.
+ */
+function aggregateStrangerReactions(reactionsByUser) {
+  const aggregate = {};
+  for (const [userId, emoji] of reactionsByUser || []) {
+    if (!aggregate[emoji]) {
+      aggregate[emoji] = { count: 0, userIds: [] };
+    }
+    aggregate[emoji].count += 1;
+    aggregate[emoji].userIds.push(userId);
+  }
+  return aggregate;
+}
+
+function findStrangerMessage(session, messageId) {
+  return session.messages.find((m) => m.id === messageId) || null;
+}
+
+function assertStrangerParticipant(session, userId) {
+  return session.user1.id === userId || session.user2.id === userId;
+}
+
+/**
+ * Toggle реакції на ефемерному повідомленні. emoji може бути знято null.
+ * Повертає { reactions } або null (немає повідомлення/прав, або зміни не було).
+ */
+export function setStrangerReaction(sessionId, userId, messageId, emoji) {
+  const session = activeSessions.get(sessionId);
+  if (!session) return null;
+  if (!assertStrangerParticipant(session, userId)) return null;
+
+  const message = findStrangerMessage(session, messageId);
+  if (!message || message.deleted) return null;
+
+  if (!session.reactions) session.reactions = new Map();
+  const byUser = session.reactions.get(messageId) || new Map();
+  const current = byUser.get(userId) || null;
+
+  // Те саме емодзі → знімаємо; нічого не змінилось → no-op без розсилки
+  if ((current || null) === (emoji || null)) return null;
+
+  if (emoji) {
+    byUser.set(userId, emoji);
+  } else {
+    byUser.delete(userId);
+  }
+  session.reactions.set(messageId, byUser);
+
+  return { reactions: aggregateStrangerReactions(byUser) };
+}
+
+/**
+ * Редагування власного ефемерного повідомлення (лише відправник, лише тіло).
+ * Повертає оновлений message або null.
+ */
+export function editStrangerMessage(sessionId, userId, messageId, body) {
+  const session = activeSessions.get(sessionId);
+  if (!session) return null;
+  if (!assertStrangerParticipant(session, userId)) return null;
+
+  const message = findStrangerMessage(session, messageId);
+  if (!message || message.deleted || message.senderId !== userId) return null;
+
+  message.body = body;
+  message.editedAt = new Date().toISOString();
+  return { message };
+}
+
+/**
+ * Tombstone-видалення власного ефемерного повідомлення.
+ * Повертає message-tombstone або null.
+ */
+export function deleteStrangerMessage(sessionId, userId, messageId) {
+  const session = activeSessions.get(sessionId);
+  if (!session) return null;
+  if (!assertStrangerParticipant(session, userId)) return null;
+
+  const message = findStrangerMessage(session, messageId);
+  if (!message || message.deleted || message.senderId !== userId) return null;
+
+  message.body = '';
+  message.attachment = null;
+  message.editedAt = null;
+  message.deleted = true;
+  if (session.reactions) session.reactions.delete(messageId);
+  return { message };
+}
+
 /**
  * Видаляє користувача з черги очікування.
  */

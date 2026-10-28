@@ -62,6 +62,7 @@ export const api = {
 
   // Користувачі та пошук
   searchUsers: (q) => request(`/api/users/search?q=${encodeURIComponent(q)}`),
+  searchMessages: (q) => request(`/api/messages/search?q=${encodeURIComponent(q)}`),
 
   // Контакти
   listContacts: () => request('/api/contacts'),
