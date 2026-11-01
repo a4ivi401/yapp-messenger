@@ -70,6 +70,8 @@ function formatMatchRow(row, partner = null) {
           partner: {
             id: partner.id,
             username: partner.username,
+            displayName: partner.displayName || null,
+            avatarUrl: partner.avatarUrl || null,
             isOnline: isOnline(partner.id),
             lastSeenAt: partner.lastSeenAt || null,
           },
@@ -89,6 +91,8 @@ export async function listMatchesForUser(userId, { limit = 50 } = {}) {
        m.created_at,
        u.id       AS partner_id,
        u.username AS partner_username,
+       u.display_name AS partner_display_name,
+       u.avatar_url AS partner_avatar_url,
        u.last_seen_at AS partner_last_seen_at
      FROM matches m
      JOIN users u
@@ -103,6 +107,8 @@ export async function listMatchesForUser(userId, { limit = 50 } = {}) {
     formatMatchRow(r, {
       id: r.partner_id,
       username: r.partner_username,
+      displayName: r.partner_display_name,
+      avatarUrl: r.partner_avatar_url,
       lastSeenAt: r.partner_last_seen_at,
     }),
   );

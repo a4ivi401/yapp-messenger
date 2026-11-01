@@ -6,16 +6,18 @@ import { isOnline } from './presence.js';
  */
 export async function listContactsForUser(userId) {
   const { rows } = await query(
-    `SELECT u.id, u.username, u.last_seen_at, c.created_at AS added_at
+    `SELECT u.id, u.username, u.display_name, u.avatar_url, u.last_seen_at, c.created_at AS added_at
        FROM contacts c
        JOIN users u ON u.id = c.contact_user_id
       WHERE c.user_id = $1
-      ORDER BY u.username ASC`,
+      ORDER BY COALESCE(u.display_name, u.username) ASC`,
     [userId],
   );
   return rows.map((r) => ({
     id: r.id,
     username: r.username,
+    displayName: r.display_name || null,
+    avatarUrl: r.avatar_url || null,
     isOnline: isOnline(r.id),
     lastSeenAt: r.last_seen_at || null,
     addedAt: r.added_at,
@@ -24,7 +26,7 @@ export async function listContactsForUser(userId) {
 
 /**
  * Додає контакт користувачу.
- * Повертає { contact: { id, username, addedAt }, added: boolean }.
+ * Повертає { contact: { id, username, displayName, avatarUrl, addedAt }, added: boolean }.
  */
 export async function addContact(userId, targetUserId) {
   if (userId === targetUserId) {
@@ -35,7 +37,7 @@ export async function addContact(userId, targetUserId) {
 
   // Отримуємо цільового користувача
   const { rows: userRows } = await query(
-    `SELECT id, username FROM users WHERE id = $1`,
+    `SELECT id, username, display_name, avatar_url FROM users WHERE id = $1`,
     [targetUserId],
   );
   const targetUser = userRows[0];
@@ -69,6 +71,8 @@ export async function addContact(userId, targetUserId) {
     contact: {
       id: targetUser.id,
       username: targetUser.username,
+      displayName: targetUser.display_name || null,
+      avatarUrl: targetUser.avatar_url || null,
       addedAt,
     },
     added,
@@ -127,6 +131,8 @@ export async function searchUsers(currentUserId, queryStr, { limit = 20 } = {}) 
     `SELECT
        u.id,
        u.username,
+       u.display_name,
+       u.avatar_url,
        u.last_seen_at,
        EXISTS (
          SELECT 1 FROM contacts c
@@ -134,12 +140,16 @@ export async function searchUsers(currentUserId, queryStr, { limit = 20 } = {}) 
        ) AS is_contact
      FROM users u
      WHERE u.id <> $1
-       AND u.username ILIKE '%' || $2 || '%' ESCAPE '\\'
+       AND (
+         u.username ILIKE '%' || $2 || '%' ESCAPE '\\'
+         OR u.display_name ILIKE '%' || $2 || '%' ESCAPE '\\'
+       )
      ORDER BY
        CASE
          WHEN LOWER(u.username) = LOWER($3) THEN 0
-         WHEN LOWER(u.username) LIKE LOWER($3) || '%' THEN 1
-         ELSE 2
+         WHEN LOWER(COALESCE(u.display_name, '')) = LOWER($3) THEN 1
+         WHEN LOWER(u.username) LIKE LOWER($3) || '%' THEN 2
+         ELSE 3
        END,
        u.username ASC
      LIMIT $4`,
@@ -149,6 +159,8 @@ export async function searchUsers(currentUserId, queryStr, { limit = 20 } = {}) 
   return rows.map((r) => ({
     id: r.id,
     username: r.username,
+    displayName: r.display_name || null,
+    avatarUrl: r.avatar_url || null,
     isContact: Boolean(r.is_contact),
     isOnline: isOnline(r.id),
     lastSeenAt: r.last_seen_at || null,

@@ -104,6 +104,8 @@ function formatConversationRow(row) {
     otherUser: {
       id: row.other_user_id,
       username: row.other_username,
+      displayName: row.other_display_name || null,
+      avatarUrl: row.other_avatar_url || null,
       // Онлайн-стан береться з пам'яті процесу (живі сокети), а не з БД —
       // тому він завжди актуальний на момент відповіді
       isOnline: isOnline(row.other_user_id),
@@ -148,6 +150,8 @@ export async function getConversationForUser(conversationId, userId) {
        m.created_at     AS matched_at,
        other_u.id       AS other_user_id,
        other_u.username AS other_username,
+       other_u.display_name AS other_display_name,
+       other_u.avatar_url AS other_avatar_url,
        other_u.last_seen_at AS other_last_seen_at,
        other_p.last_delivered_at AS other_last_delivered_at,
        other_p.last_read_at      AS other_last_read_at,
@@ -207,6 +211,8 @@ export async function listConversationsForUser(userId) {
        m.created_at     AS matched_at,
        other_u.id       AS other_user_id,
        other_u.username AS other_username,
+       other_u.display_name AS other_display_name,
+       other_u.avatar_url AS other_avatar_url,
        other_u.last_seen_at AS other_last_seen_at,
        other_p.last_delivered_at AS other_last_delivered_at,
        other_p.last_read_at      AS other_last_read_at,

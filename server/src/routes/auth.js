@@ -11,10 +11,13 @@ const credentials = z.object({
   username: z
     .string()
     .trim()
-    .min(3)
-    .max(20)
+    .min(3, 'Імʼя користувача має містити щонайменше 3 символи')
+    .max(20, 'Імʼя користувача не може перевищувати 20 символів')
     .regex(/^[a-zA-Z0-9_]+$/, 'Імʼя: тільки латиниця, цифри та _'),
-  password: z.string().min(6).max(72),
+  password: z
+    .string()
+    .min(6, 'Пароль має містити щонайменше 6 символів')
+    .max(72, 'Пароль не може перевищувати 72 символи'),
 });
 
 async function createSession(res, userId) {
@@ -45,7 +48,15 @@ authRouter.post('/register', async (req, res) => {
       [username, hashPassword(password)],
     );
     await createSession(res, rows[0].id);
-    res.status(201).json({ user: { id: rows[0].id, username } });
+    res.status(201).json({
+      user: {
+        id: rows[0].id,
+        username,
+        displayName: null,
+        avatarUrl: null,
+        bio: null,
+      },
+    });
   } catch (err) {
     if (err.code === '23505') return res.status(409).json({ error: 'Це імʼя вже зайняте' });
     throw err;
@@ -59,7 +70,7 @@ authRouter.post('/login', async (req, res) => {
   }
   const { username, password } = parsed.data;
   const { rows } = await query(
-    'SELECT id, username, password_hash FROM users WHERE username = $1',
+    'SELECT id, username, password_hash, display_name, avatar_url, bio FROM users WHERE username = $1',
     [username],
   );
   const user = rows[0];
@@ -67,7 +78,15 @@ authRouter.post('/login', async (req, res) => {
     return res.status(401).json({ error: 'Невірне імʼя або пароль' });
   }
   await createSession(res, user.id);
-  res.json({ user: { id: user.id, username: user.username } });
+  res.json({
+    user: {
+      id: user.id,
+      username: user.username,
+      displayName: user.display_name || null,
+      avatarUrl: user.avatar_url || null,
+      bio: user.bio || null,
+    },
+  });
 });
 
 authRouter.post('/logout', requireAuth, async (req, res) => {
@@ -77,5 +96,14 @@ authRouter.post('/logout', requireAuth, async (req, res) => {
 });
 
 authRouter.get('/me', requireAuth, (req, res) => {
-  res.json({ user: { id: req.user.user_id, username: req.user.username } });
+  res.json({
+    user: {
+      id: req.user.user_id,
+      username: req.user.username,
+      displayName: req.user.display_name || null,
+      avatarUrl: req.user.avatar_url || null,
+      bio: req.user.bio || null,
+      createdAt: req.user.created_at || null,
+    },
+  });
 });

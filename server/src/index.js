@@ -16,6 +16,10 @@ import { pool } from './db.js';
 import { setupSocket } from './socket.js';
 import { flushLastSeen, LAST_SEEN_FLUSH_MS } from './presence.js';
 import { rateLimit } from './rateLimit.js';
+import { setupZodLocalization } from './zodErrors.js';
+
+// Локалізація Zod-помилок українською мовою
+setupZodLocalization();
 
 const app = express();
 app.set('trust proxy', 1);

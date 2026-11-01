@@ -42,7 +42,7 @@ A messenger where you can chat with a random stranger, and if a **match** happen
 | **M1** | Live chat — the messenger core | 2–4 | ✅ done |
 | **M2** | Random stranger + matching (**twist**) | 5–6 | ✅ done |
 | **M3** | Statuses, media & extras | 7–11 | ✅ done |
-| **M4** | Deployment & defense prep | 12–14 | 🎯 planned |
+| **M4** | Deployment & defense prep | 12–14 | 🚧 12 ✅ · 13–14 planned |
 
 ### 📅 Day-by-day
 
@@ -61,7 +61,7 @@ Priority legend: 🟣 **core** (can't pass without it) · ⚪ **leftover** (only
 | **9** ✅ | Voice messages: MediaRecorder recording with a live waveform, auto-send, player with a real waveform (WebAudio), seek, microphone permission handling | ⚪ |
 | **10** ✅ | Emoji reactions (1 user × 1 emoji, toggle, realtime in permanent and anonymous chats) + right-click context menu: reactions / copy / edit / tombstone delete + search across message bodies in all chats and a contacts filter in search results | ⚪ |
 | **11** ✅ | Block / report in the anonymous chat (persistent pair ban, migration 010, closed sessions buffer for safe reporting after leaving, report modal) + basic sliding-window rate limiting (Express middleware for auth/uploads/API + Socket.IO limiters) | ⚪ |
-| **12** | Responsive polish: empty states, errors, Ukrainian zod messages | 🟣 polish |
+| **12** ✅ | User profile editing & viewing (avatar upload/removal, username/display name, bio, partner profile inspection on header click, migration 011) + UI polish (empty states for chats/search/conversations, full Ukrainian Zod localization) | 🟣 polish |
 | **13** | Deployment (Railway / Fly), HTTPS, secure cookies, env vars | 🟣 |
 | **14** | Buffer + two-tab demo + final README + defense prep | 🟣 |
 
@@ -149,7 +149,9 @@ Open **http://localhost:5173**. (Kill the docker stack first if ports are taken:
 | DELETE | `/api/contacts/:userId` | remove user from contacts by UUID |
 | GET | `/api/matches` | user's mutual match history `{ matches }` |
 | GET | `/api/matches/stats` | aggregated user stats `{ matchesCount, contactsCount }` |
-| GET | `/api/users/search?q=...` | global user search by username substring with `isContact` flag |
+| GET | `/api/users/search?q=...` | global user search by username or display name substring with `isContact` flag |
+| GET | `/api/users/:id/profile` | detailed user profile `{ user: { id, username, displayName, avatarUrl, bio, createdAt, lastSeenAt, isOnline, isContact, isBlocked, hasMatch } }` |
+| PATCH | `/api/users/me` | `{ username?, displayName?, avatarUrl?, bio? }` — update own profile with validation and uniqueness checks |
 | GET | `/api/messages/search?q=...` | search across message bodies in all of the user's conversations (substring, tombstones excluded) |
 | POST | `/api/uploads` | `multipart/form-data` with `file` field — upload photo, file or voice message (voice.webm/.ogg/.m4a, up to 100 MB); returns `{ attachment: { url, type, name, size, mime } }` |
 | GET | `/api/uploads/files/:filename` | direct media file delivery with `Cache-Control: immutable` and `X-Content-Type-Options: nosniff` |
@@ -222,6 +224,7 @@ Upon connection, each authenticated user automatically joins their own private r
 | `contact:new` | `{ contact }` | New contact added to user's list after mutual match |
 | `match:new` | `{ match }` | Realtime notification of newly recorded match to sync counters immediately |
 | `presence:update` | `{ userId, isOnline, lastSeenAt }` | User presence state change (connected / disconnected). Broadcast only to direct chat partners and contacts (privacy boundary) |
+| `user:updated` | `{ user: { id, username, displayName, avatarUrl } }` | Realtime profile update broadcast for active chat headers, contact lists, and sidebars |
 | `message:reaction` | `{ conversationId, messageId, reactions }` | Reaction aggregate `{ emoji: { count, userIds } }` after a toggle. Sent to the conversation room and participants' private rooms |
 | `message:updated` | `{ message }` | Message was edited (`editedAt` set) — the client replaces its local copy |
 | `message:deleted` | `{ conversationId, messageId }` | Message tombstoned: the client builds the tombstone locally from the lightweight payload |

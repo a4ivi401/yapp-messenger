@@ -8,7 +8,8 @@ export const SESSION_COOKIE = 'sid';
 export async function findSessionUser(token) {
   if (!token) return null;
   const { rows } = await query(
-    `SELECT s.token, s.expires_at, u.id AS user_id, u.username
+    `SELECT s.token, s.expires_at, u.id AS user_id, u.username,
+            u.display_name, u.avatar_url, u.bio, u.created_at, u.last_seen_at
        FROM sessions s
        JOIN users u ON u.id = s.user_id
       WHERE s.token = $1 AND s.expires_at > now()`,

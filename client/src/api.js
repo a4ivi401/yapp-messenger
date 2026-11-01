@@ -67,6 +67,9 @@ export const api = {
   // Користувачі та пошук
   searchUsers: (q) => request(`/api/users/search?q=${encodeURIComponent(q)}`),
   searchMessages: (q) => request(`/api/messages/search?q=${encodeURIComponent(q)}`),
+  getProfile: (userId) => request(`/api/users/${userId}/profile`),
+  updateProfile: (data) =>
+    request('/api/users/me', { method: 'PATCH', body: JSON.stringify(data) }),
 
   // Контакти
   listContacts: () => request('/api/contacts'),

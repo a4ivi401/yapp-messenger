@@ -156,7 +156,7 @@ function presenceOf(user, presenceMap) {
 }
 
 export default function Home() {
-  const { user, logout } = useAuth();
+  const { user, logout, updateUser } = useAuth();
 
   // Список реальних діалогів
   const [conversations, setConversations] = useState([]);
@@ -166,6 +166,22 @@ export default function Home() {
   // Активний чат: null | { id, type: 'direct' | 'stranger', title, otherUser, status }
   const [activeChat, setActiveChat] = useState(null);
   const [isProfileOpen, setIsProfileOpen] = useState(false);
+
+  // Редагування власного профілю (день 12)
+  const [isEditingProfile, setIsEditingProfile] = useState(false);
+  const [editDisplayName, setEditDisplayName] = useState('');
+  const [editUsername, setEditUsername] = useState('');
+  const [editBio, setEditBio] = useState('');
+  const [isSavingProfile, setIsSavingProfile] = useState(false);
+  const [profileError, setProfileError] = useState(null);
+  const [isUploadingAvatar, setIsUploadingAvatar] = useState(false);
+  const avatarFileInputRef = useRef(null);
+
+  // Перегляд профілю співрозмовника (день 12)
+  const [viewingPartnerId, setViewingPartnerId] = useState(null);
+  const [partnerProfileData, setPartnerProfileData] = useState(null);
+  const [isLoadingPartnerProfile, setIsLoadingPartnerProfile] = useState(false);
+  const [partnerProfileError, setPartnerProfileError] = useState(null);
 
   // Пошук
   const [searchQuery, setSearchQuery] = useState('');
@@ -531,7 +547,7 @@ export default function Home() {
       setActiveChat({
         id: conv.id,
         type: 'direct',
-        title: `@${conv.otherUser.username}`,
+        title: conv.otherUser?.displayName || `@${conv.otherUser.username}`,
         otherUser: conv.otherUser,
         // Бейдж «🎲 Метч» прибрано з UI: isMatch лишається в даних під окремий
         // акцент у майбутньому. Підпис у заголовку тепер береться з присутності.
@@ -1141,10 +1157,58 @@ export default function Home() {
       }));
     });
 
+    // Оновлення профілю користувача в реальному часі (день 12)
+    socket.on('user:updated', ({ user: updatedUser }) => {
+      if (!updatedUser) return;
+      if (updatedUser.id === user.id) {
+        updateUser(updatedUser);
+      }
+      setConversations((prev) =>
+        prev.map((c) =>
+          c.otherUser?.id === updatedUser.id
+            ? {
+                ...c,
+                otherUser: {
+                  ...c.otherUser,
+                  username: updatedUser.username,
+                  displayName: updatedUser.displayName,
+                  avatarUrl: updatedUser.avatarUrl,
+                },
+              }
+            : c,
+        ),
+      );
+      setActiveChat((prev) => {
+        if (prev?.otherUser?.id === updatedUser.id) {
+          return {
+            ...prev,
+            title: updatedUser.displayName || `@${updatedUser.username}`,
+            otherUser: {
+              ...prev.otherUser,
+              username: updatedUser.username,
+              displayName: updatedUser.displayName,
+              avatarUrl: updatedUser.avatarUrl,
+            },
+          };
+        }
+        return prev;
+      });
+      setPartnerProfileData((prev) =>
+        prev?.id === updatedUser.id
+          ? {
+              ...prev,
+              username: updatedUser.username,
+              displayName: updatedUser.displayName,
+              avatarUrl: updatedUser.avatarUrl,
+            }
+          : prev,
+      );
+    });
+
     return () => {
       socket.disconnect();
     };
-  }, [user.id, openDirectConversation, loadInitialData, markActiveChatRead, stopTyping, syncPresence]);
+  }, [user.id, openDirectConversation, loadInitialData, markActiveChatRead, stopTyping, syncPresence, updateUser]);
 
   // Позначаємо відкритий діалог прочитаним при відкритті та поверненні фокусу у вкладку
   useEffect(() => {
@@ -1241,7 +1305,8 @@ export default function Home() {
         .listContacts()
         .then((res) =>
           (res.contacts || []).filter((c) =>
-            (c.username || '').toLowerCase().includes(clean.toLowerCase()),
+            (c.username || '').toLowerCase().includes(clean.toLowerCase()) ||
+            (c.displayName || '').toLowerCase().includes(clean.toLowerCase()),
           ),
         )
         .catch((err) => {
@@ -1913,16 +1978,139 @@ export default function Home() {
     }
   };
 
+  // ── Керування профілем (день 12) ───────────────────────────────────────────
+
+  const handleStartEditingProfile = () => {
+    setEditDisplayName(user.displayName || '');
+    setEditUsername(user.username || '');
+    setEditBio(user.bio || '');
+    setProfileError(null);
+    setIsEditingProfile(true);
+  };
+
+  const handleSaveProfile = async (e) => {
+    e?.preventDefault();
+    setIsSavingProfile(true);
+    setProfileError(null);
+    try {
+      const res = await api.updateProfile({
+        displayName: editDisplayName.trim() || null,
+        username: editUsername.trim(),
+        bio: editBio.trim() || null,
+      });
+      if (res.user) {
+        updateUser(res.user);
+        setIsEditingProfile(false);
+      }
+    } catch (err) {
+      setProfileError(err.message || 'Не вдалося зберегти профіль');
+    } finally {
+      setIsSavingProfile(false);
+    }
+  };
+
+  const handleAvatarFileSelect = async (e) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    if (!file.type.startsWith('image/')) {
+      setProfileError('Будь ласка, оберіть файл зображення (JPEG, PNG, WebP тощо)');
+      return;
+    }
+    setIsUploadingAvatar(true);
+    setProfileError(null);
+    try {
+      const uploadRes = await api.uploadFile(file);
+      if (uploadRes?.attachment?.url) {
+        const updateRes = await api.updateProfile({ avatarUrl: uploadRes.attachment.url });
+        if (updateRes.user) {
+          updateUser(updateRes.user);
+        }
+      }
+    } catch (err) {
+      setProfileError(err.message || 'Помилка завантаження фото');
+    } finally {
+      setIsUploadingAvatar(false);
+      if (avatarFileInputRef.current) avatarFileInputRef.current.value = '';
+    }
+  };
+
+  const handleRemoveAvatar = async () => {
+    setIsUploadingAvatar(true);
+    setProfileError(null);
+    try {
+      const updateRes = await api.updateProfile({ avatarUrl: null });
+      if (updateRes.user) {
+        updateUser(updateRes.user);
+      }
+    } catch (err) {
+      setProfileError(err.message || 'Помилка видалення фото');
+    } finally {
+      setIsUploadingAvatar(false);
+    }
+  };
+
+  const handleOpenPartnerProfile = async (targetUserId) => {
+    if (!targetUserId) return;
+    setViewingPartnerId(targetUserId);
+    setIsLoadingPartnerProfile(true);
+    setPartnerProfileError(null);
+    try {
+      const res = await api.getProfile(targetUserId);
+      setPartnerProfileData(res.user);
+      if (res.user) {
+        syncPresence([res.user]);
+      }
+    } catch (err) {
+      setPartnerProfileError(err.message || 'Не вдалося завантажити профіль');
+    } finally {
+      setIsLoadingPartnerProfile(false);
+    }
+  };
+
+  const handleAddContactFromProfile = async (partnerId) => {
+    try {
+      const res = await api.addContact({ userId: partnerId });
+      if (res.contact) {
+        setPartnerProfileData((prev) => (prev ? { ...prev, isContact: true } : prev));
+        setContactsCount((prev) => prev + 1);
+      }
+    } catch (err) {
+      console.error('Failed to add contact from profile:', err);
+    }
+  };
+
+  const handleStartChatWithPartner = async (partnerUser) => {
+    setViewingPartnerId(null);
+    const existing = conversations.find((c) => c.otherUser?.id === partnerUser.id);
+    if (existing) {
+      openDirectConversation(existing);
+      return;
+    }
+    try {
+      const res = await api.createConversation(partnerUser.username);
+      if (res.conversation) {
+        setConversations((prev) => {
+          if (prev.some((c) => c.id === res.conversation.id)) return prev;
+          return [res.conversation, ...prev];
+        });
+        openDirectConversation(res.conversation);
+      }
+    } catch (err) {
+      console.error('Failed to start chat from profile:', err);
+    }
+  };
+
   // Фільтрація існуючих діалогів при пошуку
   const trimmedSearch = searchQuery.trim();
   const cleanSearch = trimmedSearch.replace(/^@+/, '').toLowerCase();
   const filteredConversations = cleanSearch
     ? conversations.filter((c) => {
         const usernameMatch = c.otherUser?.username?.toLowerCase().includes(cleanSearch);
+        const displayNameMatch = c.otherUser?.displayName?.toLowerCase().includes(cleanSearch);
         const lastMsgMatch =
           c.lastMessage?.body?.toLowerCase().includes(trimmedSearch.toLowerCase()) ||
           c.lastMessage?.attachment?.name?.toLowerCase().includes(trimmedSearch.toLowerCase());
-        return usernameMatch || lastMsgMatch;
+        return usernameMatch || displayNameMatch || lastMsgMatch;
       })
     : conversations;
 
@@ -1934,11 +2122,19 @@ export default function Home() {
         <div className="sidebar-top">
           <button
             className="menu-btn"
-            onClick={() => setIsProfileOpen(true)}
+            onClick={() => {
+              setIsEditingProfile(false);
+              setProfileError(null);
+              setIsProfileOpen(true);
+            }}
             title="Меню та профіль"
             aria-label="Меню"
           >
-            ☰
+            {user?.avatarUrl ? (
+              <img src={user.avatarUrl} alt="" className="menu-btn-avatar" />
+            ) : (
+              '☰'
+            )}
           </button>
           <div className="header-search">
             <span className="search-icon">🔍</span>
@@ -1993,7 +2189,7 @@ export default function Home() {
                   <div className="search-section-header">Ваші діалоги</div>
                   {filteredConversations.map((conv) => {
                     const isActive = activeChat?.id === conv.id;
-                    const initials = (conv.otherUser?.username || '')
+                    const initials = (conv.otherUser?.displayName || conv.otherUser?.username || '')
                       .slice(0, 2)
                       .toUpperCase();
                     return (
@@ -2006,7 +2202,11 @@ export default function Home() {
                         }}
                       >
                         <div className="chat-row-avatar">
-                          {initials}
+                          {conv.otherUser?.avatarUrl ? (
+                            <img src={conv.otherUser.avatarUrl} alt="" className="avatar-img" />
+                          ) : (
+                            initials
+                          )}
                           {presenceOf(conv.otherUser, presence).isOnline && (
                             <span className="presence-dot" aria-label="У мережі" />
                           )}
@@ -2015,8 +2215,11 @@ export default function Home() {
                           <div className="chat-row-line1">
                             <div className="chat-row-title-wrap">
                               <span className="chat-row-name">
-                                @{conv.otherUser?.username}
+                                {conv.otherUser?.displayName || `@${conv.otherUser?.username}`}
                               </span>
+                              {conv.otherUser?.displayName && (
+                                <span className="chat-row-subname">@{conv.otherUser.username}</span>
+                              )}
                             </div>
                             <span className="chat-row-time">
                               {formatTimestamp(
@@ -2040,7 +2243,7 @@ export default function Home() {
                 <>
                   <div className="search-section-header">Контакти</div>
                   {searchContacts.map((contact) => {
-                    const initials = (contact.username || '').slice(0, 2).toUpperCase();
+                    const initials = (contact.displayName || contact.username || '').slice(0, 2).toUpperCase();
                     const isActive = activeChat?.otherUser?.id === contact.id;
                     return (
                       <div
@@ -2050,14 +2253,25 @@ export default function Home() {
                         style={{ cursor: 'pointer' }}
                       >
                         <div className="chat-row-avatar">
-                          {initials}
+                          {contact.avatarUrl ? (
+                            <img src={contact.avatarUrl} alt="" className="avatar-img" />
+                          ) : (
+                            initials
+                          )}
                           {presenceOf(contact, presence).isOnline && (
                             <span className="presence-dot" aria-label="У мережі" />
                           )}
                         </div>
                         <div className="chat-row-body">
                           <div className="chat-row-line1">
-                            <span className="chat-row-name">@{contact.username}</span>
+                            <div className="chat-row-title-wrap">
+                              <span className="chat-row-name">
+                                {contact.displayName || `@${contact.username}`}
+                              </span>
+                              {contact.displayName && (
+                                <span className="chat-row-subname">@{contact.username}</span>
+                              )}
+                            </div>
                             <span className="chat-row-badge">Контакт</span>
                           </div>
                           <div className="chat-row-line2">
@@ -2118,7 +2332,7 @@ export default function Home() {
 
               {searchResults.length > 0 ? (
                 searchResults.map((targetUser) => {
-                  const initials = (targetUser.username || '')
+                  const initials = (targetUser.displayName || targetUser.username || '')
                     .slice(0, 2)
                     .toUpperCase();
                   const isActive = activeChat?.otherUser?.id === targetUser.id;
@@ -2130,16 +2344,25 @@ export default function Home() {
                       style={{ cursor: 'pointer' }}
                     >
                       <div className="chat-row-avatar">
-                        {initials}
+                        {targetUser.avatarUrl ? (
+                          <img src={targetUser.avatarUrl} alt="" className="avatar-img" />
+                        ) : (
+                          initials
+                        )}
                         {presenceOf(targetUser, presence).isOnline && (
                           <span className="presence-dot" aria-label="У мережі" />
                         )}
                       </div>
                       <div className="chat-row-body">
                         <div className="chat-row-line1">
-                          <span className="chat-row-name">
-                            @{targetUser.username}
-                          </span>
+                          <div className="chat-row-title-wrap">
+                            <span className="chat-row-name">
+                              {targetUser.displayName || `@${targetUser.username}`}
+                            </span>
+                            {targetUser.displayName && (
+                              <span className="chat-row-subname">@{targetUser.username}</span>
+                            )}
+                          </div>
                           {targetUser.isContact ? (
                             <span className="chat-row-badge">Контакт</span>
                           ) : (
@@ -2164,14 +2387,20 @@ export default function Home() {
                 })
               ) : (
                 !isSearching && (
-                  <div className="search-empty-hint">
-                    {!cleanSearch ? (
-                      'Введіть нікнейм після символу @ для пошуку.'
-                    ) : cleanSearch === user?.username?.toLowerCase() ? (
-                      `Це ваш власний акаунт (@${user.username}). Пошук знаходить інших користувачів.`
-                    ) : (
-                      `Користувачів із ніком «${searchQuery.trim()}» не знайдено.`
-                    )}
+                  <div className="search-empty-state">
+                    <span className="search-empty-icon">🔍</span>
+                    <p>
+                      {!cleanSearch ? (
+                        'Введіть імʼя або нікнейм після символу @ для пошуку.'
+                      ) : cleanSearch === user?.username?.toLowerCase() ? (
+                        `Це ваш власний акаунт (@${user.username}). Пошук знаходить інших користувачів.`
+                      ) : (
+                        `Нічого не знайдено за запитом «${searchQuery.trim()}».`
+                      )}
+                    </p>
+                    <span className="search-empty-subtext">
+                      Перевірте правильність написання нікнейму чи імені
+                    </span>
                   </div>
                 )
               )}
@@ -2180,14 +2409,25 @@ export default function Home() {
             /* Звичайний режим: список діалогів із бази даних */
             <>
               {conversations.length === 0 ? (
-                <div className="list-hint">
-                  Діалогів поки немає. Знайдіть користувача через пошук або познайомтеся у випадковому чаті!
+                <div className="empty-state-card">
+                  <div className="empty-state-icon">💬</div>
+                  <h4>У вас поки немає діалогів</h4>
+                  <p>
+                    Знаходьте співрозмовників через пошук за нікнеймом або спробуйте анонімну рулетку!
+                  </p>
+                  <button
+                    type="button"
+                    className="empty-state-action-btn"
+                    onClick={startStrangerSearch}
+                  >
+                    🎲 Знайти співрозмовника
+                  </button>
                 </div>
               ) : (
                 conversations.map((conv) => {
                   const isActive = activeChat?.id === conv.id;
                   const unread = unreadCounts[conv.id] || 0;
-                  const initials = (conv.otherUser.username || '')
+                  const initials = (conv.otherUser.displayName || conv.otherUser.username || '')
                     .slice(0, 2)
                     .toUpperCase();
                   return (
@@ -2197,7 +2437,11 @@ export default function Home() {
                       onClick={() => openDirectConversation(conv)}
                     >
                       <div className="chat-row-avatar">
-                        {initials}
+                        {conv.otherUser.avatarUrl ? (
+                          <img src={conv.otherUser.avatarUrl} alt="" className="avatar-img" />
+                        ) : (
+                          initials
+                        )}
                         {presenceOf(conv.otherUser, presence).isOnline && (
                           <span className="presence-dot" aria-label="У мережі" />
                         )}
@@ -2206,10 +2450,11 @@ export default function Home() {
                         <div className="chat-row-line1">
                           <div className="chat-row-title-wrap">
                             <span className="chat-row-name">
-                              @{conv.otherUser.username}
+                              {conv.otherUser.displayName || `@${conv.otherUser.username}`}
                             </span>
-                            {/* Бейдж «🎲 Метч» прибрано зі списку чатів: isMatch лишається
-                                в даних і повернеться окремим акцентом поза рядком діалогу. */}
+                            {conv.otherUser.displayName && (
+                              <span className="chat-row-subname">@{conv.otherUser.username}</span>
+                            )}
                           </div>
                           <span className="chat-row-time">
                             {formatTimestamp(
@@ -2263,22 +2508,39 @@ export default function Home() {
               >
                 ←
               </button>
-              <div className="chat-target-avatar">
-                {activeChat.type === 'stranger'
-                  ? (strangerSession?.partner?.anonAvatar || '🎲')
-                  : (activeChat.otherUser?.username || '').slice(0, 2).toUpperCase()}
-              </div>
-              <div className="chat-target-meta">
-                <h2>
-                  <span className="chat-target-name">{activeChat.title}</span>
-                </h2>
-                <span
-                  className={`chat-target-status ${partnerTyping ? 'is-typing' : ''} ${
-                    headerIsOffline ? 'is-offline' : ''
-                  }`}
-                >
-                  {partnerTyping ? 'друкує…' : headerStatus}
-                </span>
+              <div
+                className={`chat-target-info-wrap ${activeChat.type === 'direct' ? 'is-clickable' : ''}`}
+                onClick={() => {
+                  if (activeChat.type === 'direct' && activeChat.otherUser?.id) {
+                    handleOpenPartnerProfile(activeChat.otherUser.id);
+                  }
+                }}
+                title={activeChat.type === 'direct' ? 'Переглянути профіль співрозмовника' : ''}
+              >
+                <div className="chat-target-avatar">
+                  {activeChat.type === 'stranger' ? (
+                    strangerSession?.partner?.anonAvatar || '🎲'
+                  ) : activeChat.otherUser?.avatarUrl ? (
+                    <img src={activeChat.otherUser.avatarUrl} alt="" className="avatar-img" />
+                  ) : (
+                    (activeChat.otherUser?.displayName || activeChat.otherUser?.username || '').slice(0, 2).toUpperCase()
+                  )}
+                </div>
+                <div className="chat-target-meta">
+                  <h2>
+                    <span className="chat-target-name">{activeChat.title}</span>
+                    {activeChat.type === 'direct' && activeChat.otherUser?.displayName && (
+                      <span className="chat-target-subusername">@{activeChat.otherUser.username}</span>
+                    )}
+                  </h2>
+                  <span
+                    className={`chat-target-status ${partnerTyping ? 'is-typing' : ''} ${
+                      headerIsOffline ? 'is-offline' : ''
+                    }`}
+                  >
+                    {partnerTyping ? 'друкує…' : headerStatus}
+                  </span>
+                </div>
               </div>
               <div className="chat-header-actions">
                 {activeChat.type === 'stranger' && strangerState === 'matched' && (
@@ -2377,10 +2639,27 @@ export default function Home() {
                       <p>Завантаження повідомлень...</p>
                     </div>
                   ) : messages.length === 0 ? (
-                    <div className="chat-empty-hint">
-                      <span className="chat-empty-icon">✍️</span>
-                      <p>Почніть розмову — надішліть перше повідомлення.</p>
-                    </div>
+                    activeChat.type === 'direct' ? (
+                      <div className="chat-empty-welcome-card">
+                        <div className="chat-welcome-avatar">
+                          {activeChat.otherUser?.avatarUrl ? (
+                            <img src={activeChat.otherUser.avatarUrl} alt="" className="avatar-img" />
+                          ) : (
+                            (activeChat.otherUser?.displayName || activeChat.otherUser?.username || '').slice(0, 2).toUpperCase()
+                          )}
+                        </div>
+                        <h3>{activeChat.otherUser?.displayName || activeChat.title}</h3>
+                        <p className="chat-welcome-username">@{activeChat.otherUser?.username}</p>
+                        <p className="chat-welcome-prompt">
+                          Це початок вашого спілкування. Напишіть перше повідомлення або надішліть привітання! 👋
+                        </p>
+                      </div>
+                    ) : (
+                      <div className="chat-empty-hint">
+                        <span className="chat-empty-icon">✍️</span>
+                        <p>Почніть розмову — надішліть перше повідомлення.</p>
+                      </div>
+                    )
                   ) : (
                     messages.map((msg) => {
                       if (msg.type === 'system') {
@@ -2763,59 +3042,334 @@ export default function Home() {
         <div className="drawer-overlay" onClick={() => setIsProfileOpen(false)}>
           <div className="drawer-sheet" onClick={(e) => e.stopPropagation()}>
             <div className="drawer-header">
-              <h3>Профіль</h3>
-              <button className="close-btn" onClick={() => setIsProfileOpen(false)}>
+              <h3>{isEditingProfile ? 'Редагування профілю' : 'Мій профіль'}</h3>
+              <button
+                type="button"
+                className="close-btn"
+                onClick={() => {
+                  setIsEditingProfile(false);
+                  setIsProfileOpen(false);
+                }}
+                title="Закрити"
+              >
                 ✕
               </button>
             </div>
             <div className="drawer-body">
-              <div className="profile-hero">
-                <div className="large-avatar">
-                  {user.username.slice(0, 2).toUpperCase()}
+              {profileError && (
+                <div className="profile-error-banner" role="alert">
+                  ⚠️ {profileError}
                 </div>
-                <h3>@{user.username}</h3>
-                <span className="online-indicator">В мережі</span>
-              </div>
+              )}
 
-              <div className="profile-stats">
-                <div className="stat-box">
-                  <strong>{contactsCount}</strong>
-                  <span>контактів</span>
+              {isEditingProfile ? (
+                <form onSubmit={handleSaveProfile} className="profile-edit-form">
+                  <div className="profile-avatar-edit-wrap">
+                    <div className="large-avatar">
+                      {user.avatarUrl ? (
+                        <img src={user.avatarUrl} alt="" className="avatar-img" />
+                      ) : (
+                        (user.displayName || user.username || '?').slice(0, 2).toUpperCase()
+                      )}
+                    </div>
+                    <div className="profile-avatar-actions">
+                      <input
+                        type="file"
+                        ref={avatarFileInputRef}
+                        accept="image/*"
+                        style={{ display: 'none' }}
+                        onChange={handleAvatarFileSelect}
+                      />
+                      <button
+                        type="button"
+                        className="profile-upload-avatar-btn"
+                        onClick={() => avatarFileInputRef.current?.click()}
+                        disabled={isUploadingAvatar}
+                      >
+                        {isUploadingAvatar ? '⏳ Завантаження…' : '📷 Змінити фото'}
+                      </button>
+                      {user.avatarUrl && (
+                        <button
+                          type="button"
+                          className="profile-remove-avatar-btn"
+                          onClick={handleRemoveAvatar}
+                          disabled={isUploadingAvatar}
+                        >
+                          🗑 Видалити фото
+                        </button>
+                      )}
+                    </div>
+                  </div>
+
+                  <label className="profile-form-label">
+                    <span>Відображуване імʼя:</span>
+                    <input
+                      type="text"
+                      className="profile-input"
+                      placeholder="Ваше імʼя (наприклад, Олексій)"
+                      value={editDisplayName}
+                      onChange={(e) => setEditDisplayName(e.target.value)}
+                      maxLength={50}
+                    />
+                  </label>
+
+                  <label className="profile-form-label">
+                    <span>Нікнейм (@username):</span>
+                    <input
+                      type="text"
+                      className="profile-input"
+                      placeholder="username"
+                      value={editUsername}
+                      onChange={(e) => setEditUsername(e.target.value)}
+                      maxLength={20}
+                      required
+                    />
+                  </label>
+
+                  <label className="profile-form-label">
+                    <span>Про себе (біографія):</span>
+                    <textarea
+                      className="profile-textarea"
+                      placeholder="Розкажіть трохи про себе…"
+                      rows={3}
+                      value={editBio}
+                      onChange={(e) => setEditBio(e.target.value)}
+                      maxLength={300}
+                    />
+                  </label>
+
+                  <div className="profile-edit-actions">
+                    <button
+                      type="button"
+                      className="profile-cancel-btn"
+                      onClick={() => setIsEditingProfile(false)}
+                      disabled={isSavingProfile}
+                    >
+                      Скасувати
+                    </button>
+                    <button
+                      type="submit"
+                      className="profile-save-btn"
+                      disabled={isSavingProfile}
+                    >
+                      {isSavingProfile ? 'Збереження…' : 'Зберегти зміни'}
+                    </button>
+                  </div>
+                </form>
+              ) : (
+                <>
+                  <div className="profile-hero">
+                    <div className="large-avatar-wrap">
+                      <div className="large-avatar">
+                        {user.avatarUrl ? (
+                          <img src={user.avatarUrl} alt="" className="avatar-img" />
+                        ) : (
+                          (user.displayName || user.username || '?').slice(0, 2).toUpperCase()
+                        )}
+                      </div>
+                      <input
+                        type="file"
+                        ref={avatarFileInputRef}
+                        accept="image/*"
+                        style={{ display: 'none' }}
+                        onChange={handleAvatarFileSelect}
+                      />
+                      <button
+                        type="button"
+                        className="avatar-quick-edit-btn"
+                        onClick={() => avatarFileInputRef.current?.click()}
+                        title="Змінити аватарку"
+                        disabled={isUploadingAvatar}
+                      >
+                        📷
+                      </button>
+                    </div>
+
+                    <h3 className="profile-hero-name">
+                      {user.displayName || user.username}
+                    </h3>
+                    <p className="profile-hero-username">@{user.username}</p>
+                    <span className="online-indicator">В мережі</span>
+
+                    <button
+                      type="button"
+                      className="profile-edit-trigger-btn"
+                      onClick={handleStartEditingProfile}
+                    >
+                      ✏️ Редагувати профіль
+                    </button>
+                  </div>
+
+                  {user.bio && (
+                    <div className="profile-bio-card">
+                      <span className="profile-card-label">Про себе</span>
+                      <p>{user.bio}</p>
+                    </div>
+                  )}
+
+                  <div className="profile-stats">
+                    <div className="stat-box">
+                      <strong>{contactsCount}</strong>
+                      <span>контактів</span>
+                    </div>
+                    <div className="stat-box">
+                      <strong>{matchesCount}</strong>
+                      <span>метчів</span>
+                    </div>
+                  </div>
+
+                  <div className="drawer-menu">
+                    <button
+                      type="button"
+                      className="drawer-item"
+                      onClick={async () => {
+                        const perm = await requestNotificationPermission();
+                        if (perm === 'granted') {
+                          playNotificationSound();
+                          showBrowserNotification({
+                            title: 'Yapp',
+                            body: 'Сповіщення успішно налаштовано!',
+                          });
+                        }
+                      }}
+                    >
+                      <span>🔔 Перевірити сповіщення</span>
+                      <span>→</span>
+                    </button>
+                    <button type="button" className="drawer-item" onClick={startStrangerSearch}>
+                      <span>🎲 Знайти співрозмовника</span>
+                      <span>→</span>
+                    </button>
+                  </div>
+
+                  <div className="drawer-footer">
+                    <button type="button" className="logout-btn" onClick={logout}>
+                      Вийти з акаунту
+                    </button>
+                  </div>
+                </>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* БІЧНА ПАНЕЛЬ ПЕРЕГЛЯДУ ПРОФІЛЮ СПІВРОЗМОВНИКА (ДЕНЬ 12) */}
+      {viewingPartnerId && (
+        <div className="drawer-overlay" onClick={() => setViewingPartnerId(null)}>
+          <div className="drawer-sheet" onClick={(e) => e.stopPropagation()}>
+            <div className="drawer-header">
+              <h3>Профіль користувача</h3>
+              <button
+                type="button"
+                className="close-btn"
+                onClick={() => setViewingPartnerId(null)}
+                title="Закрити"
+              >
+                ✕
+              </button>
+            </div>
+
+            <div className="drawer-body">
+              {isLoadingPartnerProfile ? (
+                <div className="profile-loading-state">
+                  <div className="profile-spinner" />
+                  <p>Завантаження профілю…</p>
                 </div>
-                <div className="stat-box">
-                  <strong>{matchesCount}</strong>
-                  <span>метчів</span>
+              ) : partnerProfileError ? (
+                <div className="report-error-banner" role="alert">
+                  ⚠️ {partnerProfileError}
                 </div>
-              </div>
+              ) : partnerProfileData ? (
+                <>
+                  <div className="profile-hero">
+                    <div className="large-avatar">
+                      {partnerProfileData.avatarUrl ? (
+                        <img
+                          src={partnerProfileData.avatarUrl}
+                          alt={partnerProfileData.displayName || partnerProfileData.username}
+                          className="avatar-img"
+                        />
+                      ) : (
+                        (partnerProfileData.displayName || partnerProfileData.username || '?')
+                          .slice(0, 2)
+                          .toUpperCase()
+                      )}
+                    </div>
+                    <h3 className="profile-hero-name">
+                      {partnerProfileData.displayName || partnerProfileData.username}
+                    </h3>
+                    <p className="profile-hero-username">@{partnerProfileData.username}</p>
+                    <span
+                      className={`profile-presence-tag ${
+                        presenceOf(partnerProfileData, presence).isOnline ? 'is-online' : 'is-offline'
+                      }`}
+                    >
+                      {presenceOf(partnerProfileData, presence).isOnline
+                        ? '🟢 В мережі'
+                        : formatHeaderLastSeen(presenceOf(partnerProfileData, presence).lastSeenAt)}
+                    </span>
+                  </div>
 
-              <div className="drawer-menu">
-                <button
-                  className="drawer-item"
-                  onClick={async () => {
-                    const perm = await requestNotificationPermission();
-                    if (perm === 'granted') {
-                      playNotificationSound();
-                      showBrowserNotification({
-                        title: 'Yapp',
-                        body: 'Сповіщення успішно налаштовано!',
-                      });
-                    }
-                  }}
-                >
-                  <span>🔔 Перевірити сповіщення</span>
-                  <span>→</span>
-                </button>
-                <button className="drawer-item" onClick={startStrangerSearch}>
-                  <span>🎲 Знайти співрозмовника</span>
-                  <span>→</span>
-                </button>
-              </div>
+                  {partnerProfileData.bio && (
+                    <div className="profile-bio-card">
+                      <span className="profile-card-label">Про себе</span>
+                      <p>{partnerProfileData.bio}</p>
+                    </div>
+                  )}
 
-              <div className="drawer-footer">
-                <button className="logout-btn" onClick={logout}>
-                  Вийти з акаунту
-                </button>
-              </div>
+                  <div className="profile-details-list">
+                    <div className="profile-detail-row">
+                      <span className="detail-icon">📅</span>
+                      <div className="detail-text">
+                        <span className="detail-label">У Yapp з</span>
+                        <span className="detail-value">
+                          {partnerProfileData.createdAt
+                            ? new Date(partnerProfileData.createdAt).toLocaleDateString('uk-UA', {
+                                month: 'long',
+                                year: 'numeric',
+                              })
+                            : 'Невідомо'}
+                        </span>
+                      </div>
+                    </div>
+
+                    <div className="profile-detail-row">
+                      <span className="detail-icon">🤝</span>
+                      <div className="detail-text">
+                        <span className="detail-label">Статус знайомства</span>
+                        <span className="detail-value">
+                          {partnerProfileData.isContact ? 'У ваших контактах' : 'Не в контактах'}
+                        </span>
+                      </div>
+                    </div>
+                  </div>
+
+                  <div className="drawer-menu">
+                    {!partnerProfileData.isContact && (
+                      <button
+                        type="button"
+                        className="drawer-item"
+                        onClick={() => handleAddContactFromProfile(partnerProfileData.id)}
+                      >
+                        <span>➕ Додати в контакти</span>
+                        <span>→</span>
+                      </button>
+                    )}
+
+                    {activeChat?.otherUser?.id !== partnerProfileData.id && (
+                      <button
+                        type="button"
+                        className="drawer-item"
+                        onClick={() => handleStartChatWithPartner(partnerProfileData)}
+                      >
+                        <span>💬 Відкрити діалог</span>
+                        <span>→</span>
+                      </button>
+                    )}
+                  </div>
+                </>
+              ) : null}
             </div>
           </div>
         </div>
