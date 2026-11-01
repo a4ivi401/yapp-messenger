@@ -1025,11 +1025,23 @@ body {
   margin-bottom: 2px;
 }
 
+.message-footer {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 4px;
+}
+
 .message-meta {
   display: flex;
   align-items: center;
   justify-content: flex-end;
   gap: 4px;
+  margin-left: auto;
+  align-self: flex-end;
+  user-select: none;
 }
 
 .message-time {
@@ -1897,40 +1909,134 @@ body {
   font-size: 10.5px;
 }
 
-/* Чіпси реакцій під бульбашкою */
+/* Чіпси реакцій всередині бульбашки повідомлення (стиль Telegram з аватарами) */
 .message-reactions {
   display: flex;
   flex-wrap: wrap;
-  gap: 4px;
-  margin: 2px 6px;
+  align-items: center;
+  gap: 5px;
+  margin: 0;
 }
 
 .message-reaction-chip {
   display: inline-flex;
   align-items: center;
-  gap: 3px;
-  padding: 2px 8px;
-  font-size: 12px;
-  border: 1px solid var(--border);
-  border-radius: 999px;
-  background: var(--bubble-in);
+  gap: 5px;
+  height: 26px;
+  padding: 0 7px 0 8px;
+  border-radius: 9999px;
+  border: 1px solid rgba(210, 57, 102, 0.28);
+  background: rgba(210, 57, 102, 0.1);
   color: inherit;
   cursor: pointer;
-  line-height: 1.4;
-  transition: transform 0.1s ease, background 0.15s ease;
+  line-height: 1;
+  font-size: 14px;
+  transition: transform 0.12s ease, background 0.15s ease, border-color 0.15s ease, box-shadow 0.15s ease;
+  user-select: none;
 }
 
 .message-reaction-chip:hover {
-  transform: scale(1.08);
+  transform: scale(1.06);
+  background: rgba(210, 57, 102, 0.18);
 }
 
+.message-reaction-chip:active {
+  transform: scale(0.96);
+}
+
+/* Активна / власна реакція (яскрава рожева капсула, як на скріншоті) */
 .message-reaction-chip.is-mine {
-  background: var(--accent-soft);
-  border-color: var(--accent);
+  background: #d23966;
+  border-color: #be2854;
+  color: #ffffff;
+  box-shadow: 0 2px 6px rgba(210, 57, 102, 0.28);
+}
+
+.message-reaction-chip.is-mine:hover {
+  background: #dc4372;
+}
+
+/* На вихідних бульбашках */
+.message-out .message-reaction-chip {
+  background: rgba(255, 255, 255, 0.18);
+  border-color: rgba(255, 255, 255, 0.32);
+  color: #ffffff;
+}
+
+.message-out .message-reaction-chip:hover {
+  background: rgba(255, 255, 255, 0.26);
 }
 
 .message-out .message-reaction-chip.is-mine {
-  background: color-mix(in srgb, var(--accent-soft) 60%, transparent);
+  background: #d23966;
+  border-color: rgba(255, 255, 255, 0.45);
+  color: #ffffff;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.25);
+}
+
+.message-out .message-reaction-chip.is-mine:hover {
+  background: #dc4372;
+}
+
+.message-reaction-emoji {
+  font-size: 14px;
+  line-height: 1;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.message-reaction-avatars {
+  display: inline-flex;
+  align-items: center;
+}
+
+.message-reaction-avatar {
+  width: 19px;
+  height: 19px;
+  border-radius: 50%;
+  flex-shrink: 0;
+  display: grid;
+  place-items: center;
+  font-size: 9.5px;
+  font-weight: 700;
+  line-height: 1;
+  color: #ffffff;
+  overflow: hidden;
+  position: relative;
+  user-select: none;
+  box-shadow: 0 0 0 1.5px rgba(255, 255, 255, 0.85);
+}
+
+.message-reaction-chip.is-mine .message-reaction-avatar {
+  box-shadow: 0 0 0 1.5px #d23966;
+}
+
+.message-out .message-reaction-chip:not(.is-mine) .message-reaction-avatar {
+  box-shadow: 0 0 0 1.5px rgba(255, 255, 255, 0.4);
+}
+
+.message-reaction-avatar + .message-reaction-avatar {
+  margin-left: -6px;
+}
+
+.message-reaction-avatar img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  border-radius: 50%;
+}
+
+.message-reaction-avatar.is-anon {
+  font-size: 11px;
+  background: rgba(255, 255, 255, 0.25);
+  color: inherit;
+}
+
+.message-reaction-count {
+  font-size: 11.5px;
+  font-weight: 600;
+  margin-left: 2px;
 }
 
 /* Контекстне меню (right-click) */
@@ -1975,7 +2081,8 @@ body {
 }
 
 .context-menu-reaction.is-mine {
-  background: var(--accent-soft);
+  background: rgba(210, 57, 102, 0.16);
+  box-shadow: 0 0 0 1.5px #d23966;
 }
 
 .context-menu-item {

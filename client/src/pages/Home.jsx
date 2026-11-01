@@ -65,6 +65,27 @@ const TICK_TITLE = { sent: 'Надіслано', delivered: 'Доставлен�
 // Емодзі-рядок реакцій у контекстному меню (дзеркало REACTION_EMOJIS на сервері)
 const REACTION_EMOJIS = ['👍', '❤️', '😂', '😮', '😢', '🙏'];
 
+// Градієнти Telegram-стилю для міні-аватарів у реакціях та списку
+const AVATAR_GRADIENTS = [
+  'linear-gradient(135deg, #f97316, #ea580c)', // orange
+  'linear-gradient(135deg, #06b6d4, #0891b2)', // cyan
+  'linear-gradient(135deg, #10b981, #059669)', // emerald
+  'linear-gradient(135deg, #8b5cf6, #7c3aed)', // purple
+  'linear-gradient(135deg, #ec4899, #db2777)', // pink
+  'linear-gradient(135deg, #3b82f6, #2563eb)', // blue
+  'linear-gradient(135deg, #eab308, #ca8a04)', // amber
+  'linear-gradient(135deg, #14b8a6, #0d9488)', // teal
+];
+
+function getAvatarGradient(name = '') {
+  let hash = 0;
+  for (let i = 0; i < name.length; i++) {
+    hash = name.charCodeAt(i) + ((hash << 5) - hash);
+  }
+  const index = Math.abs(hash) % AVATAR_GRADIENTS.length;
+  return AVATAR_GRADIENTS[index];
+}
+
 // Приблизні габарити меню (клампінг позиції до країв вікна)
 const CONTEXT_MENU_W = 240;
 const CONTEXT_MENU_H = 260;
@@ -1475,6 +1496,75 @@ export default function Home() {
     }
   };
 
+  // Отримуємо дані для відображення аватара користувача в реакції
+  const getReactionUserInfo = useCallback(
+    (uid) => {
+      const isMe = uid === user.id;
+
+      if (activeChat?.type === 'stranger') {
+        if (isMe) {
+          return {
+            isAnon: true,
+            content: strangerSession?.myAnon?.anonAvatar || '🎭',
+            title: 'Ви',
+          };
+        }
+        return {
+          isAnon: true,
+          content: strangerSession?.partner?.anonAvatar || '🎲',
+          title: strangerSession?.partner?.anonName || 'Співрозмовник',
+        };
+      }
+
+      // Прямий діалог (direct chat)
+      let username = '';
+      if (isMe) {
+        username = user.username;
+      } else if (activeChat?.otherUser?.id === uid) {
+        username = activeChat.otherUser.username;
+      } else {
+        const conv = conversations.find((c) => c.otherUser?.id === uid);
+        username = conv?.otherUser?.username || '';
+      }
+
+      const initial = username ? username.slice(0, 1).toUpperCase() : '👤';
+      return {
+        isAnon: false,
+        content: initial,
+        title: isMe ? 'Ви' : username ? `@${username}` : 'Співрозмовник',
+        gradient: getAvatarGradient(username || uid),
+      };
+    },
+    [user.id, user.username, activeChat, strangerSession, conversations],
+  );
+
+  // Підказка (tooltip) реакції українською
+  const formatReactionTitle = useCallback(
+    (emoji, userIds, isMine) => {
+      if (activeChat?.type === 'stranger') {
+        if (userIds.length > 1) {
+          return `${emoji} · Ви та співрозмовник (${isMine ? 'натисніть, щоб прибрати свою' : 'натисніть, щоб додати'})`;
+        }
+        if (isMine) {
+          return `${emoji} · Ваша реакція (натисніть, щоб прибрати)`;
+        }
+        return `${emoji} · Реакція співрозмовника (натисніть, щоб поставити таку саму)`;
+      }
+
+      const names = userIds.map((uid) => {
+        if (uid === user.id) return 'Ви';
+        if (activeChat?.otherUser?.id === uid) return `@${activeChat.otherUser.username}`;
+        const conv = conversations.find((c) => c.otherUser?.id === uid);
+        return conv?.otherUser?.username ? `@${conv.otherUser.username}` : 'Співрозмовник';
+      });
+
+      const joinedNames = names.join(', ');
+      const action = isMine ? 'натисніть, щоб прибрати' : 'натисніть, щоб поставити таку саму';
+      return `${emoji} · ${joinedNames} (${action})`;
+    },
+    [user.id, activeChat, conversations],
+  );
+
   // Дія з меню: реакція / копіювання / редагування / видалення
   const handleMenuAction = (action, emoji) => {
     if (!contextMenu) return;
@@ -2269,49 +2359,70 @@ export default function Home() {
                             {msg.deleted && (
                               <div className="message-text is-deleted">Повідомлення видалено</div>
                             )}
-                            <div className="message-meta">
-                              <span className="message-time">
-                                {formatTimestamp(msg.createdAt)}
-                                {msg.editedAt && !msg.deleted && (
-                                  <span className="message-edited"> · редаговано</span>
-                                )}
-                              </span>
-                              {tickStatus && (
-                                <span
-                                  className={`message-ticks is-${tickStatus}`}
-                                  title={TICK_TITLE[tickStatus]}
-                                  aria-label={TICK_TITLE[tickStatus]}
-                                >
-                                  {TICK_GLYPH[tickStatus]}
-                                </span>
+                            <div className="message-footer">
+                              {/* Капсульні чипси реакцій (стиль Telegram з аватаром) */}
+                              {msg.reactions && Object.keys(msg.reactions).length > 0 && (
+                                <div className="message-reactions">
+                                  {Object.entries(msg.reactions).map(
+                                    ([emoji, { count, userIds }]) => {
+                                      const isMine = userIds.includes(user.id);
+                                      const title = formatReactionTitle(emoji, userIds, isMine);
+                                      return (
+                                        <button
+                                          key={emoji}
+                                          type="button"
+                                          className={`message-reaction-chip ${isMine ? 'is-mine' : ''}`}
+                                          title={title}
+                                          onClick={(e) => {
+                                            e.stopPropagation();
+                                            dispatchToggleReaction(msg, emoji, isMine);
+                                          }}
+                                        >
+                                          <span className="message-reaction-emoji">{emoji}</span>
+                                          <span className="message-reaction-avatars">
+                                            {userIds && userIds.length > 0 ? (
+                                              userIds.map((uid) => {
+                                                const info = getReactionUserInfo(uid);
+                                                return (
+                                                  <span
+                                                    key={uid}
+                                                    className={`message-reaction-avatar ${info.isAnon ? 'is-anon' : ''}`}
+                                                    style={info.isAnon ? {} : { background: info.gradient }}
+                                                    title={info.title}
+                                                  >
+                                                    {info.content}
+                                                  </span>
+                                                );
+                                              })
+                                            ) : (
+                                              count > 1 && <span className="message-reaction-count">{count}</span>
+                                            )}
+                                          </span>
+                                        </button>
+                                      );
+                                    },
+                                  )}
+                                </div>
                               )}
+                              <div className="message-meta">
+                                <span className="message-time">
+                                  {formatTimestamp(msg.createdAt)}
+                                  {msg.editedAt && !msg.deleted && (
+                                    <span className="message-edited"> · редаговано</span>
+                                  )}
+                                </span>
+                                {tickStatus && (
+                                  <span
+                                    className={`message-ticks is-${tickStatus}`}
+                                    title={TICK_TITLE[tickStatus]}
+                                    aria-label={TICK_TITLE[tickStatus]}
+                                  >
+                                    {TICK_GLYPH[tickStatus]}
+                                  </span>
+                                )}
+                              </div>
                             </div>
                           </div>
-                          {/* Чипси реакцій під бульбашкою (агрегат із сервера) */}
-                          {msg.reactions && Object.keys(msg.reactions).length > 0 && (
-                            <div className="message-reactions">
-                              {Object.entries(msg.reactions).map(
-                                ([emoji, { count, userIds }]) => {
-                                  const isMine = userIds.includes(user.id);
-                                  return (
-                                    <button
-                                      key={emoji}
-                                      type="button"
-                                      className={`message-reaction-chip ${isMine ? 'is-mine' : ''}`}
-                                      title={isMine ? 'Прибрати реакцію' : 'Поставити таку саму'}
-                                      onClick={(e) => {
-                                        e.stopPropagation();
-                                        dispatchToggleReaction(msg, emoji, isMine);
-                                      }}
-                                    >
-                                      {emoji}
-                                      {count > 1 ? ` ${count}` : ''}
-                                    </button>
-                                  );
-                                },
-                              )}
-                            </div>
-                          )}
                         </div>
                       );
                     })
