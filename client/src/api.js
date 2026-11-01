@@ -13,6 +13,9 @@ async function request(path, options = {}) {
     if (res.status === 413) {
       throw new Error('Файл завеликий (перевищено ліміт 100 МБ)');
     }
+    if (res.status === 429) {
+      throw new Error(body?.error || 'Забагато запитів. Будь ласка, зачекайте хвилину.');
+    }
     const message = body?.error || (res.status >= 500 ? 'Помилка сервера' : 'Помилка запиту');
     throw new Error(message);
   }

@@ -231,6 +231,25 @@ export default function Home() {
   const [partnerMatchRequested, setPartnerMatchRequested] = useState(false);
   const [strangerEndReason, setStrangerEndReason] = useState(null); // 'left' | 'next' | 'disconnected'
 
+  // Модальне вікно скарги / блокування (день 11)
+  const [isReportModalOpen, setIsReportModalOpen] = useState(false);
+  const [reportReason, setReportReason] = useState('spam');
+  const [reportDetails, setReportDetails] = useState('');
+  const [alsoBlock, setAlsoBlock] = useState(true);
+  const [isSubmittingReport, setIsSubmittingReport] = useState(false);
+  const [reportError, setReportError] = useState(null);
+  const [rateLimitNotice, setRateLimitNotice] = useState(null);
+  const rateLimitNoticeTimerRef = useRef(null);
+
+  const showRateLimitNotice = useCallback((msg) => {
+    if (!msg) return;
+    setRateLimitNotice(msg);
+    clearTimeout(rateLimitNoticeTimerRef.current);
+    rateLimitNoticeTimerRef.current = setTimeout(() => {
+      setRateLimitNotice(null);
+    }, 4500);
+  }, []);
+
   // Refs для уникнення stale closures у слухачах Socket.IO
   const activeChatRef = useRef(activeChat);
   activeChatRef.current = activeChat;
@@ -1077,11 +1096,13 @@ export default function Home() {
       setStrangerEndReason(reason || 'left');
 
       const reasonText =
-        reason === 'next'
-          ? 'Співрозмовник перейшов до іншого.'
-          : reason === 'disconnected'
-          ? 'Співрозмовник від’єднався.'
-          : 'Співрозмовник залишив чат.';
+        reason === 'blocked'
+          ? 'Співрозмовник заблокував цей діалог.'
+          : reason === 'next'
+            ? 'Співрозмовник перейшов до іншого.'
+            : reason === 'disconnected'
+              ? 'Співрозмовник від’єднався.'
+              : 'Співрозмовник залишив чат.';
 
       setMessages((prev) => [
         ...prev,
@@ -1094,7 +1115,9 @@ export default function Home() {
       ]);
 
       setActiveChat((prev) =>
-        prev && prev.type === 'stranger' ? { ...prev, status: 'розмову завершено' } : prev,
+        prev && prev.type === 'stranger'
+          ? { ...prev, status: reason === 'blocked' ? 'заблоковано' : 'розмову завершено' }
+          : prev,
       );
     });
 
@@ -1383,6 +1406,9 @@ export default function Home() {
           (res) => {
             if (!res?.ok) {
               console.error('Failed to send stranger message:', res?.error);
+              if (res?.error && res.error.includes('Забагато')) {
+                showRateLimitNotice(res.error);
+              }
             } else if (res?.message) {
               setMessages((prev) => {
                 if (prev.some((m) => m.id === res.message.id)) return prev;
@@ -1403,8 +1429,12 @@ export default function Home() {
         (res) => {
           if (!res?.ok) {
             console.error('Failed to send message via socket:', res?.error);
-            // Фолбек на REST у разі помилки сокета
-            api.sendMessage(activeChat.id, text, attachment).catch(console.error);
+            if (res?.error && (res.error.includes('Забагато') || res.error.includes('заблоковано'))) {
+              showRateLimitNotice(res.error);
+            } else {
+              // Фолбек на REST у разі помилки сокета
+              api.sendMessage(activeChat.id, text, attachment).catch(console.error);
+            }
           }
         },
       );
@@ -1702,6 +1732,7 @@ export default function Home() {
       socketRef.current.emit('stranger:search', (res) => {
         if (!res?.ok) {
           console.error('Failed to start stranger search:', res?.error);
+          if (res?.error) showRateLimitNotice(res.error);
         }
       });
     }
@@ -1742,9 +1773,88 @@ export default function Home() {
       socketRef.current.emit('stranger:next', (res) => {
         if (!res?.ok) {
           console.error('Failed to switch to next stranger:', res?.error);
+          if (res?.error) showRateLimitNotice(res.error);
         }
       });
     }
+  };
+
+  // Надсилання скарги на співрозмовника
+  const handleSubmitReport = (e) => {
+    e.preventDefault();
+    const sessionId = strangerSessionRef.current?.sessionId || activeChat?.id;
+    if (!sessionId || !socketRef.current?.connected) return;
+
+    setIsSubmittingReport(true);
+    setReportError(null);
+
+    socketRef.current.emit(
+      'stranger:report',
+      {
+        sessionId,
+        reason: reportReason,
+        details: reportDetails.trim(),
+        block: alsoBlock,
+      },
+      (res) => {
+        setIsSubmittingReport(false);
+        if (res?.ok) {
+          setIsReportModalOpen(false);
+          setStrangerState('ended');
+          setStrangerEndReason('blocked');
+          setMessages((prev) => [
+            ...prev,
+            {
+              id: `sys-report-${Date.now()}`,
+              type: 'system',
+              body: alsoBlock
+                ? '🛡️ Скаргу надіслано. Співрозмовника заблоковано — ви більше не зустрінетесь.'
+                : '🛡️ Скаргу надіслано модераторам. Дякуємо за допомогу!',
+              createdAt: new Date().toISOString(),
+            },
+          ]);
+          setActiveChat((prev) =>
+            prev && prev.type === 'stranger'
+              ? { ...prev, status: alsoBlock ? 'заблоковано' : 'розмову завершено' }
+              : prev,
+          );
+        } else {
+          setReportError(res?.error || 'Не вдалося надіслати скаргу');
+        }
+      },
+    );
+  };
+
+  // Швидке блокування без скарги
+  const handleQuickBlock = () => {
+    const sessionId = strangerSessionRef.current?.sessionId || activeChat?.id;
+    if (!sessionId || !socketRef.current?.connected) return;
+
+    setIsSubmittingReport(true);
+    setReportError(null);
+
+    socketRef.current.emit('stranger:block', { sessionId }, (res) => {
+      setIsSubmittingReport(false);
+      if (res?.ok) {
+        setIsReportModalOpen(false);
+        setStrangerState('ended');
+        setStrangerEndReason('blocked');
+        setMessages((prev) => [
+          ...prev,
+          {
+            id: `sys-block-${Date.now()}`,
+            type: 'system',
+            body: '🚫 Співрозмовника заблоковано. Ви більше не зустрінетесь у чаті.',
+            createdAt: new Date().toISOString(),
+          },
+        ]);
+        setActiveChat((prev) =>
+          prev && prev.type === 'stranger' ? { ...prev, status: 'заблоковано' } : prev,
+        );
+      } else {
+        setReportError(res?.error || 'Не вдалося заблокувати співрозмовника');
+      }
+    });
   };
 
   // Запит або підтвердження додавання в контакти («🤝 Додати в контакти»)
@@ -2204,6 +2314,20 @@ export default function Home() {
                     🎲 Новий пошук
                   </button>
                 )}
+                {activeChat.type === 'stranger' && (strangerState === 'matched' || strangerState === 'ended') && (
+                  <button
+                    type="button"
+                    className="report-stranger-btn"
+                    onClick={() => {
+                      setReportError(null);
+                      setIsReportModalOpen(true);
+                    }}
+                    title="Поскаржитися або заблокувати співрозмовника"
+                    aria-label="Скарга або блок"
+                  >
+                    🚫 Скарга / Блок
+                  </button>
+                )}
                 <button
                   className="leave-chat-btn"
                   onClick={handleBackToList}
@@ -2521,6 +2645,21 @@ export default function Home() {
                         </button>
                       </div>
                     )}
+                    {/* Плашка перевищення rate-limit або обмеження */}
+                    {rateLimitNotice && (
+                      <div className="rate-limit-banner" role="alert">
+                        <span>⏳ {rateLimitNotice}</span>
+                        <button
+                          type="button"
+                          className="staging-clear-btn"
+                          onClick={() => setRateLimitNotice(null)}
+                          title="Закрити"
+                          aria-label="Закрити"
+                        >
+                          ✕
+                        </button>
+                      </div>
+                    )}
                     {isRecording ? (
                       /* Панель запису замінює поле вводу, поки йде запис */
                       <VoiceRecordingBar
@@ -2764,6 +2903,122 @@ export default function Home() {
               🗑 Видалити
             </button>
           )}
+        </div>
+      )}
+
+      {/* МОДАЛЬНЕ ВІКНО СКАРГИ / БЛОКУВАННЯ (ДЕНЬ 11) */}
+      {isReportModalOpen && (
+        <div
+          className="report-modal-overlay"
+          onClick={() => !isSubmittingReport && setIsReportModalOpen(false)}
+        >
+          <div className="report-modal-sheet" onClick={(e) => e.stopPropagation()}>
+            <div className="report-modal-header">
+              <div className="report-modal-title-wrap">
+                <span className="report-modal-icon">🛡️</span>
+                <div>
+                  <h3>Скарга на співрозмовника</h3>
+                  <p className="report-modal-subtitle">
+                    {strangerSession?.partner
+                      ? `${strangerSession.partner.anonAvatar} ${strangerSession.partner.anonName}`
+                      : 'Анонімний співрозмовник'}
+                  </p>
+                </div>
+              </div>
+              <button
+                type="button"
+                className="close-btn"
+                onClick={() => !isSubmittingReport && setIsReportModalOpen(false)}
+                title="Закрити"
+              >
+                ✕
+              </button>
+            </div>
+
+            <form onSubmit={handleSubmitReport} className="report-modal-body">
+              {reportError && (
+                <div className="report-error-banner" role="alert">
+                  ⚠️ {reportError}
+                </div>
+              )}
+
+              <label className="report-field-label">Оберіть причину скарги:</label>
+              <div className="report-reasons-group">
+                {[
+                  { id: 'spam', label: 'Спам або реклама', icon: '📢' },
+                  { id: 'abuse', label: 'Образи або токсична поведінка', icon: '🤬' },
+                  { id: 'inappropriate', label: 'Неприйнятний або небажаний контент', icon: '🔞' },
+                  { id: 'other', label: 'Інше порушення правил', icon: '⚠️' },
+                ].map((item) => (
+                  <label
+                    key={item.id}
+                    className={`report-reason-option ${reportReason === item.id ? 'is-selected' : ''}`}
+                  >
+                    <input
+                      type="radio"
+                      name="reportReason"
+                      value={item.id}
+                      checked={reportReason === item.id}
+                      onChange={(e) => setReportReason(e.target.value)}
+                    />
+                    <span className="report-reason-icon">{item.icon}</span>
+                    <span className="report-reason-text">{item.label}</span>
+                  </label>
+                ))}
+              </div>
+
+              <label className="report-field-label" htmlFor="report-details-input">
+                Додатковий коментар (необов'язково):
+              </label>
+              <textarea
+                id="report-details-input"
+                className="report-details-textarea"
+                rows={3}
+                placeholder="Опишіть, що саме сталося…"
+                value={reportDetails}
+                onChange={(e) => setReportDetails(e.target.value)}
+                maxLength={1000}
+              />
+
+              <label className="report-checkbox-label">
+                <input
+                  type="checkbox"
+                  checked={alsoBlock}
+                  onChange={(e) => setAlsoBlock(e.target.checked)}
+                />
+                <span>Заблокувати цього користувача (ви більше ніколи не зустрінетесь у чаті)</span>
+              </label>
+
+              <div className="report-modal-actions">
+                <button
+                  type="button"
+                  className="report-quick-block-btn"
+                  onClick={handleQuickBlock}
+                  disabled={isSubmittingReport}
+                  title="Швидко заблокувати без надсилання звіту"
+                >
+                  🚫 Лише заблокувати
+                </button>
+                <div className="report-primary-actions">
+                  <button
+                    type="button"
+                    className="report-cancel-btn"
+                    onClick={() => setIsReportModalOpen(false)}
+                    disabled={isSubmittingReport}
+                  >
+                    Скасувати
+                  </button>
+                  <button
+                    type="submit"
+                    className="report-submit-btn"
+                    disabled={isSubmittingReport}
+                  >
+                    {isSubmittingReport ? 'Надсилання…' : 'Надіслати скаргу'}
+                  </button>
+                </div>
+              </div>
+            </form>
+          </div>
         </div>
       )}
     </div>

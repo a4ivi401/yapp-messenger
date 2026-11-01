@@ -41,7 +41,7 @@ A messenger where you can chat with a random stranger, and if a **match** happen
 | **M0** | Project skeleton + auth | 1 | ✅ done |
 | **M1** | Live chat — the messenger core | 2–4 | ✅ done |
 | **M2** | Random stranger + matching (**twist**) | 5–6 | ✅ done |
-| **M3** | Statuses, media & extras | 7–11 | 🚧 7–10 ✅ · 11 planned |
+| **M3** | Statuses, media & extras | 7–11 | ✅ done |
 | **M4** | Deployment & defense prep | 12–14 | 🎯 planned |
 
 ### 📅 Day-by-day
@@ -60,7 +60,7 @@ Priority legend: 🟣 **core** (can't pass without it) · ⚪ **leftover** (only
 | **8** ✅ | Media: photos & files (`multer`, `uploads` volume), image previews, modal lightbox, secure storage & downloads | ⚪ |
 | **9** ✅ | Voice messages: MediaRecorder recording with a live waveform, auto-send, player with a real waveform (WebAudio), seek, microphone permission handling | ⚪ |
 | **10** ✅ | Emoji reactions (1 user × 1 emoji, toggle, realtime in permanent and anonymous chats) + right-click context menu: reactions / copy / edit / tombstone delete + search across message bodies in all chats and a contacts filter in search results | ⚪ |
-| **11** | Block / report in the anonymous chat + basic rate limiting | ⚪ |
+| **11** ✅ | Block / report in the anonymous chat (persistent pair ban, migration 010, closed sessions buffer for safe reporting after leaving, report modal) + basic sliding-window rate limiting (Express middleware for auth/uploads/API + Socket.IO limiters) | ⚪ |
 | **12** | Responsive polish: empty states, errors, Ukrainian zod messages | 🟣 polish |
 | **13** | Deployment (Railway / Fly), HTTPS, secure cookies, env vars | 🟣 |
 | **14** | Buffer + two-tab demo + final README + defense prep | 🟣 |
@@ -202,6 +202,8 @@ Upon connection, each authenticated user automatically joins their own private r
 | `stranger:react` | `{ sessionId, messageId, emoji }` | `{ ok: true }` | Toggle a reaction in the anonymous chat (in-memory session state); broadcasts `stranger:reaction` |
 | `stranger:edit` | `{ sessionId, messageId, body }` | `{ ok: true, message }` | Edit own ephemeral message; broadcasts `stranger:updated` |
 | `stranger:delete` | `{ sessionId, messageId }` | `{ ok: true, message }` | Tombstone-delete own ephemeral message; broadcasts `stranger:updated` |
+| `stranger:block` | `{ sessionId }` | `{ ok: true, blocked: true }` | Permanently block partner in anonymous chat (active or recently closed). Pair will never match in roulette again and cannot message each other |
+| `stranger:report` | `{ sessionId, category, details?, alsoBlock? }` | `{ ok: true, reportId, blocked }` | Report violation (`spam`, `abuse`, `inappropriate`, `other`) with optional automatic blocking |
 
 #### Server Events (Server → Client)
 
@@ -212,7 +214,7 @@ Upon connection, each authenticated user automatically joins their own private r
 | `stranger:message` | `{ message }` | Ephemeral message delivered in room `stranger:<sessionId>` |
 | `stranger:match-invited` | `{ sessionId }` | Partner sent an invitation to exchange contacts |
 | `stranger:revealed` | `{ sessionId, conversationId, conversation, partner }` | Mutual match! Real usernames revealed, chat converted to permanent contact |
-| `stranger:left` | `{ sessionId, reason }` | Partner left or skipped to another stranger (`reason: 'next' \| 'left' \| 'disconnected'`) |
+| `stranger:left` | `{ sessionId, reason }` | Partner left or skipped to another stranger (`reason: 'next' \| 'left' \| 'disconnected' \| 'blocked'`) |
 | `message:read` | `{ conversationId, userId, lastReadAt }` | Partner read the conversation — ticks of own messages turn "read" |
 | `message:delivered` | `{ conversationId, messageId, userId, lastDeliveredAt }` | Partner's device received the message (ticks turn `✓✓`) |
 | `typing` | `{ conversationId, userId, isTyping }` | Partner is typing in a direct chat. The receiving client hides the indicator on its own after 4 s without new signals |
@@ -245,4 +247,6 @@ yapp-messenger/
 - Sessions — random token stored in DB, carried only in an httpOnly cookie.
 - Parameterized SQL everywhere; input validated with zod.
 - File uploads — 100 MB size limit, dangerous/executable extension blocking (.exe, .bat, .sh, .php, etc.), UUID storage filename validation preventing path traversal, isolated `uploads` volume.
+- Rate limiting — in-memory sliding window: protects authentication (20 attempts/min), uploads (30/min), global API (300/min), and socket events (message sends, stranger search, reports). Standard RFC headers `RateLimit-*` and HTTP 429 status.
+- Blocking & Safety — persistent user blocklists (`user_blocks` table), bidirectional messaging block and exclusion from stranger roulette, moderation report system (`reports` table).
 - Planned: HTTPS on deployment.

@@ -12,6 +12,7 @@ import {
   createMessage,
   getConversationParticipantIds,
 } from '../conversations.js';
+import { isBlockedPair } from '../blocks.js';
 
 // Express 4 не передає помилки з async-обробників у error-middleware (а глобального тут і немає),
 // тож обгортаємо кожен хендлер, щоб кинута помилка не стала unhandled rejection.
@@ -86,6 +87,10 @@ conversationsRouter.post(
     }
     if (target.id === me) {
       return res.status(400).json({ error: 'Не можна почати діалог із самим собою' });
+    }
+
+    if (await isBlockedPair(me, target.id)) {
+      return res.status(403).json({ error: 'Неможливо розпочати діалог: користувача заблоковано' });
     }
 
     const { id, created } = await findOrCreateDirectConversation(me, target.id);
@@ -166,6 +171,12 @@ conversationsRouter.post(
       return res.status(404).json({ error: 'Діалог не знайдено' });
     }
 
+    const participantIds = await getConversationParticipantIds(req.params.id);
+    const partnerId = participantIds.find((id) => id !== me);
+    if (partnerId && (await isBlockedPair(me, partnerId))) {
+      return res.status(403).json({ error: 'Неможливо надіслати: користувача заблоковано' });
+    }
+
     const message = await createMessage(
       req.params.id,
       me,
@@ -175,7 +186,6 @@ conversationsRouter.post(
 
     const io = req.app.get('io');
     if (io) {
-      const participantIds = await getConversationParticipantIds(req.params.id);
       const targetRooms = [
         `conversation:${req.params.id}`,
         ...participantIds.map((id) => `user:${id}`),

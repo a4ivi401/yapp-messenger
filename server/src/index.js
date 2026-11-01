@@ -15,10 +15,31 @@ import { attachUser } from './middleware/auth.js';
 import { pool } from './db.js';
 import { setupSocket } from './socket.js';
 import { flushLastSeen, LAST_SEEN_FLUSH_MS } from './presence.js';
+import { rateLimit } from './rateLimit.js';
 
 const app = express();
+app.set('trust proxy', 1);
 app.use(express.json());
 app.use(cookieParser());
+
+// Rate limiters для HTTP-запитів
+export const authLimiter = rateLimit({
+  windowMs: 60_000,
+  max: 20,
+  message: 'Забагато спроб авторизації. Будь ласка, зачекайте хвилину.',
+});
+
+export const uploadLimiter = rateLimit({
+  windowMs: 60_000,
+  max: 30,
+  message: 'Забагато завантажень. Будь ласка, зачекайте хвилину.',
+});
+
+export const apiLimiter = rateLimit({
+  windowMs: 60_000,
+  max: 300,
+  message: 'Забагато запитів. Будь ласка, зачекайте.',
+});
 
 app.get('/health', async (_req, res) => {
   try {
@@ -29,14 +50,19 @@ app.get('/health', async (_req, res) => {
   }
 });
 
+// Глобальний базовий rate-limit на API
+app.use('/api', apiLimiter);
+
 app.use(attachUser);
+app.use('/api/auth/login', authLimiter);
+app.use('/api/auth/register', authLimiter);
 app.use('/api/auth', authRouter);
 app.use('/api/conversations', conversationsRouter);
 app.use('/api/messages', messagesRouter);
 app.use('/api/contacts', contactsRouter);
 app.use('/api/matches', matchesRouter);
 app.use('/api/users', usersRouter);
-app.use('/api/uploads', uploadsRouter);
+app.use('/api/uploads', uploadLimiter, uploadsRouter);
 
 // У проді цей же сервер віддає зібраний фронтенд (client/dist)
 const clientDist = path.resolve(import.meta.dirname, '../../client/dist');

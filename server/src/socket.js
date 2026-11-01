@@ -17,6 +17,14 @@ import {
 import { addContact } from './contacts.js';
 import { recordMatch } from './matches.js';
 import {
+  blockUser,
+  createReport,
+  getBlockedUserIds,
+  isBlockedPair,
+  REPORT_REASONS,
+} from './blocks.js';
+import { createSocketRateLimiter } from './rateLimit.js';
+import {
   addSocket,
   removeSocket,
   isOnline,
@@ -35,6 +43,8 @@ import {
   deleteStrangerMessage,
   getSession,
   getSessionByUserId,
+  getStrangerSessionOrRecent,
+  recordSeenPair,
   handleDisconnect,
 } from './stranger.js';
 
@@ -136,9 +146,25 @@ const strangerDeleteSchema = z.object({
   messageId: z.string().min(1),
 });
 
+const strangerBlockSchema = z.object({
+  sessionId: z.string().uuid(),
+});
+
+const strangerReportSchema = z.object({
+  sessionId: z.string().uuid(),
+  reason: z.enum(REPORT_REASONS),
+  details: z.string().trim().max(1000).optional().default(''),
+  block: z.boolean().optional().default(true),
+});
+
 // Не частіше одного typing-сигналу на адресата за 500 мс: клієнт уже тротлить,
 // це другий рубіж проти багатого/зламаного клієнта.
 const TYPING_THROTTLE_MS = 500;
+
+// Rate limiters для Socket.IO подій
+const socketMsgLimiter = createSocketRateLimiter({ windowMs: 2000, max: 10 });
+const socketSearchLimiter = createSocketRateLimiter({ windowMs: 2000, max: 4 });
+const socketReportLimiter = createSocketRateLimiter({ windowMs: 60_000, max: 5 });
 
 /**
  * Налаштовує Socket.IO сервер: авторизація, кімнати діалогів та realtime-повідомлення.
@@ -276,6 +302,11 @@ export function setupSocket(io) {
     // Відправка повідомлення через сокет
     socket.on('message:send', async (data, ack) => {
       try {
+        const rl = socketMsgLimiter.check(socket.user.id);
+        if (!rl.allowed) {
+          return ack?.({ ok: false, error: 'Забагато повідомлень. Будь ласка, зачекайте…' });
+        }
+
         const parsed = sendMessageSchema.safeParse(data);
         if (!parsed.success) {
           return ack?.({ ok: false, error: parsed.error.issues[0].message });
@@ -287,10 +318,15 @@ export function setupSocket(io) {
           return ack?.({ ok: false, error: 'Діалог не знайдено' });
         }
 
+        // Отримуємо всіх учасників для перевірки блокування та розсилки
+        const participantIds = await getConversationParticipantIds(conversationId);
+        const partnerId = participantIds.find((id) => id !== socket.user.id);
+        if (partnerId && (await isBlockedPair(socket.user.id, partnerId))) {
+          return ack?.({ ok: false, error: 'Неможливо надіслати: користувача заблоковано' });
+        }
+
         const message = await createMessage(conversationId, socket.user.id, body, attachment);
 
-        // Отримуємо всіх учасників для трансляції в кімнату діалогу та персональні кімнати
-        const participantIds = await getConversationParticipantIds(conversationId);
         const targetRooms = [
           `conversation:${conversationId}`,
           ...participantIds.map((id) => `user:${id}`),
@@ -538,8 +574,19 @@ export function setupSocket(io) {
     }
 
     // Початок пошуку
-    socket.on('stranger:search', (ack) => {
+    socket.on('stranger:search', async (ack) => {
       try {
+        const rl = socketSearchLimiter.check(socket.user.id);
+        if (!rl.allowed) {
+          return ack?.({ ok: false, error: 'Зачекайте секунду перед наступним пошуком…' });
+        }
+
+        // Підтягуємо блокування з БД у seenPartners перед підбором
+        const blockedIds = await getBlockedUserIds(socket.user.id);
+        for (const bid of blockedIds) {
+          recordSeenPair(socket.user.id, bid);
+        }
+
         const result = findOrEnqueue(socket.user, socket.id, io);
         if (!result.matched) {
           return ack?.({ ok: true, status: 'waiting' });
@@ -567,6 +614,11 @@ export function setupSocket(io) {
     // Відправка повідомлення незнайомцю (ефемерне повідомлення в пам'яті)
     socket.on('stranger:message', (data, ack) => {
       try {
+        const rl = socketMsgLimiter.check(socket.user.id);
+        if (!rl.allowed) {
+          return ack?.({ ok: false, error: 'Забагато повідомлень. Будь ласка, зачекайте…' });
+        }
+
         const parsed = strangerMsgSchema.safeParse(data);
         if (!parsed.success) {
           return ack?.({ ok: false, error: parsed.error.issues[0].message });
@@ -722,8 +774,13 @@ export function setupSocket(io) {
     });
 
     // Перехід до наступного співрозмовника («🎲 Інший»)
-    socket.on('stranger:next', (ack) => {
+    socket.on('stranger:next', async (ack) => {
       try {
+        const rl = socketSearchLimiter.check(socket.user.id);
+        if (!rl.allowed) {
+          return ack?.({ ok: false, error: 'Зачекайте секунду перед наступним пошуком…' });
+        }
+
         const left = leaveSession(socket.user.id, 'next');
         if (left) {
           socket.leave(`stranger:${left.sessionId}`);
@@ -731,6 +788,12 @@ export function setupSocket(io) {
             sessionId: left.sessionId,
             reason: 'next',
           });
+        }
+
+        // Підтягуємо блокування з БД перед новим підбором
+        const blockedIds = await getBlockedUserIds(socket.user.id);
+        for (const bid of blockedIds) {
+          recordSeenPair(socket.user.id, bid);
         }
 
         const result = findOrEnqueue(socket.user, socket.id, io);
@@ -743,6 +806,104 @@ export function setupSocket(io) {
       } catch (err) {
         console.error('stranger:next error:', err);
         ack?.({ ok: false, error: 'Помилка переходу до наступного співрозмовника' });
+      }
+    });
+
+    // Блокування співрозмовника в анонімному чаті
+    socket.on('stranger:block', async (data, ack) => {
+      try {
+        const parsed = strangerBlockSchema.safeParse(data);
+        if (!parsed.success) {
+          return ack?.({ ok: false, error: parsed.error.issues[0].message });
+        }
+
+        const { sessionId } = parsed.data;
+        const session = getStrangerSessionOrRecent(sessionId);
+        if (!session) {
+          return ack?.({ ok: false, error: 'Сесію не знайдено' });
+        }
+
+        const isUser1 = session.user1.id === socket.user.id;
+        const isUser2 = session.user2.id === socket.user.id;
+        if (!isUser1 && !isUser2) {
+          return ack?.({ ok: false, error: 'Ви не є учасником цієї сесії' });
+        }
+
+        const partner = isUser1 ? session.user2 : session.user1;
+
+        // 1. Персистентне блокування в БД
+        await blockUser(socket.user.id, partner.id);
+
+        // 2. Виключення з підбору в пам'яті
+        recordSeenPair(socket.user.id, partner.id);
+
+        // 3. Завершення активної сесії, якщо вона ще не завершена
+        const left = leaveSession(socket.user.id, 'blocked');
+        if (left) {
+          socket.leave(`stranger:${sessionId}`);
+          io.to(`user:${partner.id}`).emit('stranger:left', {
+            sessionId,
+            reason: 'blocked',
+          });
+        }
+
+        ack?.({ ok: true });
+      } catch (err) {
+        console.error('stranger:block error:', err);
+        ack?.({ ok: false, error: 'Помилка блокування співрозмовника' });
+      }
+    });
+
+    // Поскаржитися на співрозмовника в анонімному чаті (опціонально з блокуванням)
+    socket.on('stranger:report', async (data, ack) => {
+      try {
+        const rl = socketReportLimiter.check(socket.user.id);
+        if (!rl.allowed) {
+          return ack?.({ ok: false, error: 'Забагато скарг. Будь ласка, зачекайте…' });
+        }
+
+        const parsed = strangerReportSchema.safeParse(data);
+        if (!parsed.success) {
+          return ack?.({ ok: false, error: parsed.error.issues[0].message });
+        }
+
+        const { sessionId, reason, details, block } = parsed.data;
+        const session = getStrangerSessionOrRecent(sessionId);
+        if (!session) {
+          return ack?.({ ok: false, error: 'Сесію не знайдено' });
+        }
+
+        const isUser1 = session.user1.id === socket.user.id;
+        const isUser2 = session.user2.id === socket.user.id;
+        if (!isUser1 && !isUser2) {
+          return ack?.({ ok: false, error: 'Ви не є учасником цієї сесії' });
+        }
+
+        const partner = isUser1 ? session.user2 : session.user1;
+
+        // 1. Зберігаємо скаргу в БД
+        await createReport(socket.user.id, partner.id, reason, details);
+
+        // 2. Якщо прапорець блокування активний (за замовчуванням true)
+        if (block !== false) {
+          await blockUser(socket.user.id, partner.id);
+          recordSeenPair(socket.user.id, partner.id);
+        }
+
+        // 3. Завершуємо активну сесію
+        const left = leaveSession(socket.user.id, 'blocked');
+        if (left) {
+          socket.leave(`stranger:${sessionId}`);
+          io.to(`user:${partner.id}`).emit('stranger:left', {
+            sessionId,
+            reason: 'blocked',
+          });
+        }
+
+        ack?.({ ok: true });
+      } catch (err) {
+        console.error('stranger:report error:', err);
+        ack?.({ ok: false, error: 'Помилка надсилання скарги' });
       }
     });
 

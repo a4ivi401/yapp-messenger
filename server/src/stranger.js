@@ -60,6 +60,14 @@ const waitingQueue = [];
 const activeSessions = new Map();
 
 /**
+ * Нещодавно завершені анонімні сесії (зберігаються ~15 хв для можливості
+ * поскаржитися або заблокувати співрозмовника навіть після того, як він вийшов):
+ * Map<sessionId, { id, user1, user2, messages, closedAt }>
+ */
+const recentClosedSessions = new Map();
+const MAX_RECENT_CLOSED = 200;
+
+/**
  * Індекс користувач -> активна сесія:
  * Map<userId, sessionId>
  */
@@ -111,6 +119,14 @@ export function recordSeenPair(userIdA, userIdB) {
  */
 export function getSession(sessionId) {
   return activeSessions.get(sessionId) || null;
+}
+
+/**
+ * Знаходить активну або нещодавно завершену сесію за sessionId.
+ * Дозволяє поскаржитися на співрозмовника або заблокувати його навіть після виходу.
+ */
+export function getStrangerSessionOrRecent(sessionId) {
+  return activeSessions.get(sessionId) || recentClosedSessions.get(sessionId) || null;
 }
 
 /**
@@ -265,6 +281,19 @@ export function leaveSession(userId, reason = 'left') {
 
   // Завжди фіксуємо взаємний запис у seenPartners, щоб більше не зустрітися
   recordSeenPair(session.user1.id, session.user2.id);
+
+  // Зберігаємо в буфер нещодавно закритих сесій (для можливості скарги/блоку після виходу)
+  recentClosedSessions.set(sessionId, {
+    id: sessionId,
+    user1: session.user1,
+    user2: session.user2,
+    messages: session.messages,
+    closedAt: Date.now(),
+  });
+  if (recentClosedSessions.size > MAX_RECENT_CLOSED) {
+    const oldestKey = recentClosedSessions.keys().next().value;
+    recentClosedSessions.delete(oldestKey);
+  }
 
   // Очищаємо індекси
   activeSessions.delete(sessionId);
@@ -481,6 +510,7 @@ export function handleDisconnect(userId, socketId) {
 export function _resetStateForTesting() {
   waitingQueue.length = 0;
   activeSessions.clear();
+  recentClosedSessions.clear();
   userSessionIndex.clear();
   socketSessionIndex.clear();
   userSeenPartners.clear();
