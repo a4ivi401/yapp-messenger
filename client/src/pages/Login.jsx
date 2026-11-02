@@ -1,6 +1,7 @@
 import { useState } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import { useAuth } from '../auth.jsx';
+import Logo from '../components/Logo.jsx';
 
 export default function Login() {
   const { login } = useAuth();
@@ -22,6 +23,9 @@ export default function Login() {
 
   return (
     <form className="card" onSubmit={submit}>
+      <div className="auth-logo-wrap">
+        <Logo size={72} className="auth-favicon-badge" />
+      </div>
       <h1>Yapp</h1>
       <p className="muted">Знову з нами? Увійди.</p>
       <input

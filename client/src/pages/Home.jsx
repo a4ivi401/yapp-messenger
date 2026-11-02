@@ -10,6 +10,7 @@ import {
 import { startVoiceRecording } from '../utils/voice.js';
 import VoicePlayer from '../components/VoicePlayer.jsx';
 import VoiceRecordingBar from '../components/VoiceRecordingBar.jsx';
+import Logo from '../components/Logo.jsx';
 
 function formatTimestamp(isoString) {
   if (!isoString) return '';
@@ -3024,7 +3025,9 @@ export default function Home() {
           /* Вітальний екран на десктопі */
           <div className="desktop-welcome-pane">
             <div className="welcome-box">
-              <div className="welcome-icon">🎲</div>
+              <div style={{ display: 'flex', justifyContent: 'center', marginBottom: 16 }}>
+                <Logo size={72} />
+              </div>
               <h2>Ласкаво просимо до Yapp</h2>
               <p>
                 Оберіть діалог зі списку зліва, знайдіть користувача за ніком або познайомтесь із випадковою людиною в анонімному режимі.
@@ -3246,6 +3249,10 @@ export default function Home() {
                     <button type="button" className="logout-btn" onClick={logout}>
                       Вийти з акаунту
                     </button>
+                    <div className="drawer-brand-footnote">
+                      <Logo size={20} />
+                      <span>Yapp Messenger</span>
+                    </div>
                   </div>
                 </>
               )}
