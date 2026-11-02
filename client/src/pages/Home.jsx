@@ -3603,7 +3603,7 @@ export default function Home() {
                     >
                       {presenceOf(partnerProfileData, presence).isOnline
                         ? '🟢 В мережі'
-                        : formatHeaderLastSeen(presenceOf(partnerProfileData, presence).lastSeenAt)}
+                        : formatLastSeen(presenceOf(partnerProfileData, presence).lastSeenAt, nowMs)}
                     </span>
                   </div>
 
