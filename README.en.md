@@ -69,18 +69,18 @@ Priority legend: 🟣 **core** (can't pass without it) · ⚪ **leftover** (only
 
 **🟣 Core (the goal for the defense):**
 - Auth ✅
-- Live chat (realtime + DB persistence)
-- Chats and contacts list
-- **Random stranger + matching → contact** — the main highlight at the defense
-- Minimal statuses + "typing…"
-- Responsive interface
-- HTTPS deployment + demo + README
+- Live chat (realtime + DB persistence) ✅
+- Chats and contacts list ✅
+- **Random stranger + matching → contact** — the main highlight at the defense ✅
+- Minimal statuses + "typing…" ✅
+- Responsive interface ✅
+- HTTPS deployment + demo + README ✅
 
 **⚪ Leftover time** (add in this order, if time remains):
 1. Photos / files ✅
 2. Voice messages ✅
 3. Edit / delete + reactions + search across chats and contacts ✅
-4. Block / report + rate limiting
+4. Block / report + rate limiting ✅
 5. Dark theme
 
 **🚫 Deliberately out of scope** (to fit ~28 h):
