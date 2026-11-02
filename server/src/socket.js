@@ -12,6 +12,7 @@ import {
   setMessageReaction,
   editMessage,
   deleteMessage,
+  deleteConversation,
   REACTION_EMOJIS,
 } from './conversations.js';
 import { addContact } from './contacts.js';
@@ -76,6 +77,7 @@ const sendMessageSchema = z
     conversationId: z.string().uuid(),
     body: z.string().trim().max(4000).optional().default(''),
     attachment: attachmentSchema.optional().nullable(),
+    replyToId: z.string().uuid().optional().nullable(),
   })
   .refine(
     (data) => (data.body && data.body.length > 0) || Boolean(data.attachment),
@@ -87,6 +89,7 @@ const strangerMsgSchema = z
     sessionId: z.string().uuid(),
     body: z.string().trim().max(4000).optional().default(''),
     attachment: attachmentSchema.optional().nullable(),
+    replyToId: z.string().trim().max(128).optional().nullable(),
   })
   .refine(
     (data) => (data.body && data.body.length > 0) || Boolean(data.attachment),
@@ -299,6 +302,31 @@ export function setupSocket(io) {
       }
     });
 
+    // Видалення діалогу через сокет
+    socket.on('conversation:delete', async (data, ack) => {
+      try {
+        const parsed = joinLeaveSchema.safeParse(data);
+        if (!parsed.success) {
+          return ack?.({ ok: false, error: parsed.error.issues[0].message });
+        }
+
+        const { conversationId } = parsed.data;
+        const result = await deleteConversation(conversationId, socket.user.id);
+        if (!result) {
+          return ack?.({ ok: false, error: 'Діалог не знайдено або немає прав' });
+        }
+
+        for (const pid of result.participantIds) {
+          io.to(`user:${pid}`).emit('conversation:deleted', { conversationId });
+        }
+
+        ack?.({ ok: true });
+      } catch (err) {
+        console.error('conversation:delete error:', err);
+        ack?.({ ok: false, error: 'Внутрішня помилка' });
+      }
+    });
+
     // Відправка повідомлення через сокет
     socket.on('message:send', async (data, ack) => {
       try {
@@ -312,7 +340,7 @@ export function setupSocket(io) {
           return ack?.({ ok: false, error: parsed.error.issues[0].message });
         }
 
-        const { conversationId, body, attachment } = parsed.data;
+        const { conversationId, body, attachment, replyToId } = parsed.data;
         const participant = await isParticipant(conversationId, socket.user.id);
         if (!participant) {
           return ack?.({ ok: false, error: 'Діалог не знайдено' });
@@ -325,7 +353,13 @@ export function setupSocket(io) {
           return ack?.({ ok: false, error: 'Неможливо надіслати: користувача заблоковано' });
         }
 
-        const message = await createMessage(conversationId, socket.user.id, body, attachment);
+        const message = await createMessage(
+          conversationId,
+          socket.user.id,
+          body,
+          attachment,
+          replyToId,
+        );
 
         const targetRooms = [
           `conversation:${conversationId}`,
@@ -624,7 +658,7 @@ export function setupSocket(io) {
           return ack?.({ ok: false, error: parsed.error.issues[0].message });
         }
 
-        const { sessionId, body, attachment } = parsed.data;
+        const { sessionId, body, attachment, replyToId } = parsed.data;
         const session = getSession(sessionId);
         if (!session) {
           return ack?.({ ok: false, error: 'Сесію не знайдено або вже завершено' });
@@ -634,6 +668,22 @@ export function setupSocket(io) {
         const isUser2 = session.user2.id === socket.user.id;
         if (!isUser1 && !isUser2) {
           return ack?.({ ok: false, error: 'Ви не є учасником цієї сесії' });
+        }
+
+        let replyTo = null;
+        if (replyToId && session.messages) {
+          const orig = session.messages.find((m) => m.id === replyToId);
+          if (orig) {
+            replyTo = {
+              id: orig.id,
+              body: orig.body || '',
+              senderId: orig.senderId,
+              senderAnonName: orig.senderAnonName,
+              senderAnonAvatar: orig.senderAnonAvatar,
+              attachmentType: orig.attachment?.type || null,
+              deleted: Boolean(orig.deleted),
+            };
+          }
         }
 
         const myUser = isUser1 ? session.user1 : session.user2;
@@ -646,6 +696,7 @@ export function setupSocket(io) {
           senderAnonAvatar: myUser.anonAvatar,
           body: body || '',
           attachment: attachment || null,
+          replyTo,
           createdAt: new Date().toISOString(),
         };
 

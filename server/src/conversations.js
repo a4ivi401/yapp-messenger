@@ -91,6 +91,38 @@ export async function getConversationParticipantIds(conversationId) {
   return rows.map((r) => r.user_id);
 }
 
+/**
+ * Видаляє 1-на-1 діалог повністю (каскадно видаляє всі повідомлення, реакції та квитанції).
+ * Лише учасник діалогу може видалити його.
+ * Повертає { conversationId, participantIds } або null, якщо діалог не знайдено / користувач не є учасником.
+ */
+export async function deleteConversation(conversationId, userId) {
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+
+    const { rows: partRows } = await client.query(
+      `SELECT user_id FROM conversation_participants WHERE conversation_id = $1`,
+      [conversationId],
+    );
+    const participantIds = partRows.map((r) => r.user_id);
+    if (!participantIds.includes(userId)) {
+      await client.query('ROLLBACK');
+      return null;
+    }
+
+    await client.query(`DELETE FROM conversations WHERE id = $1`, [conversationId]);
+
+    await client.query('COMMIT');
+    return { conversationId, participantIds };
+  } catch (err) {
+    await client.query('ROLLBACK');
+    throw err;
+  } finally {
+    client.release();
+  }
+}
+
 function formatConversationRow(row) {
   return {
     id: row.id,
@@ -277,6 +309,18 @@ function formatMessageRow(row) {
           name: row.attachment_name,
           size: row.attachment_size,
           mime: row.attachment_mime,
+        }
+      : null,
+    // Цитата / відповідь на повідомлення (null, якщо не є відповіддю)
+    replyTo: row.reply_to_id
+      ? {
+          id: row.reply_to_id,
+          body: row.reply_to_body || '',
+          senderId: row.reply_to_sender_id ?? null,
+          senderUsername: row.reply_to_sender_username ?? null,
+          senderDisplayName: row.reply_to_sender_display_name ?? null,
+          attachmentType: row.reply_to_attachment_type ?? null,
+          deleted: row.reply_to_deleted_at != null,
         }
       : null,
     // Агрегат { emoji: { count, userIds } }: наповнюється attachReactions для сторінок,
@@ -545,9 +589,18 @@ export async function listMessages(conversationId, { limit = 50, before = null }
               m.edited_at, m.deleted_at,
               m.attachment_url, m.attachment_type, m.attachment_name,
               m.attachment_size, m.attachment_mime,
+              m.reply_to_id,
+              rm.body AS reply_to_body,
+              rm.sender_id AS reply_to_sender_id,
+              rm.attachment_type AS reply_to_attachment_type,
+              rm.deleted_at AS reply_to_deleted_at,
+              ru.username AS reply_to_sender_username,
+              ru.display_name AS reply_to_sender_display_name,
               u.username AS sender_username
          FROM messages m
          JOIN users u ON u.id = m.sender_id
+         LEFT JOIN messages rm ON rm.id = m.reply_to_id
+         LEFT JOIN users ru ON ru.id = rm.sender_id
         WHERE m.conversation_id = $1
           AND (m.created_at, m.id) < ($2, $3)
         ORDER BY m.created_at DESC, m.id DESC
@@ -561,9 +614,18 @@ export async function listMessages(conversationId, { limit = 50, before = null }
               m.edited_at, m.deleted_at,
               m.attachment_url, m.attachment_type, m.attachment_name,
               m.attachment_size, m.attachment_mime,
+              m.reply_to_id,
+              rm.body AS reply_to_body,
+              rm.sender_id AS reply_to_sender_id,
+              rm.attachment_type AS reply_to_attachment_type,
+              rm.deleted_at AS reply_to_deleted_at,
+              ru.username AS reply_to_sender_username,
+              ru.display_name AS reply_to_sender_display_name,
               u.username AS sender_username
          FROM messages m
          JOIN users u ON u.id = m.sender_id
+         LEFT JOIN messages rm ON rm.id = m.reply_to_id
+         LEFT JOIN users ru ON ru.id = rm.sender_id
         WHERE m.conversation_id = $1
         ORDER BY m.created_at DESC, m.id DESC
         LIMIT $2`,
@@ -599,9 +661,18 @@ export async function listMessagesAround(conversationId, messageId, userId, { co
               m.edited_at, m.deleted_at,
               m.attachment_url, m.attachment_type, m.attachment_name,
               m.attachment_size, m.attachment_mime,
+              m.reply_to_id,
+              rm.body AS reply_to_body,
+              rm.sender_id AS reply_to_sender_id,
+              rm.attachment_type AS reply_to_attachment_type,
+              rm.deleted_at AS reply_to_deleted_at,
+              ru.username AS reply_to_sender_username,
+              ru.display_name AS reply_to_sender_display_name,
               u.username AS sender_username
          FROM messages m
-         JOIN users u ON u.id = m.sender_id`;
+         JOIN users u ON u.id = m.sender_id
+         LEFT JOIN messages rm ON rm.id = m.reply_to_id
+         LEFT JOIN users ru ON ru.id = rm.sender_id`;
 
   const { rows: targetRows } = await query(
     `${pageSelect}
@@ -655,9 +726,9 @@ export async function listMessagesAround(conversationId, messageId, userId, { co
 }
 
 /**
- * Створює нове повідомлення в діалозі.
+ * Створює нове повідомлення в діалозі (з можливістю цитування/відповіді replyToId).
  */
-export async function createMessage(conversationId, senderId, body, attachment = null) {
+export async function createMessage(conversationId, senderId, body, attachment = null, replyToId = null) {
   const attachmentUrl = attachment?.url || null;
   const attachmentType = attachment?.type || null;
   const attachmentName = attachment?.name || null;
@@ -667,22 +738,43 @@ export async function createMessage(conversationId, senderId, body, attachment =
       : null;
   const attachmentMime = attachment?.mime || null;
 
+  let validReplyToId = null;
+  if (replyToId) {
+    const { rows: replyCheck } = await query(
+      `SELECT id FROM messages WHERE id = $1 AND conversation_id = $2`,
+      [replyToId, conversationId],
+    );
+    if (replyCheck.length > 0) {
+      validReplyToId = replyCheck[0].id;
+    }
+  }
+
   const { rows } = await query(
     `WITH inserted AS (
        INSERT INTO messages (
          conversation_id, sender_id, body,
-         attachment_url, attachment_type, attachment_name, attachment_size, attachment_mime
+         attachment_url, attachment_type, attachment_name, attachment_size, attachment_mime,
+         reply_to_id
        )
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
        RETURNING id, conversation_id, sender_id, body,
                  attachment_url, attachment_type, attachment_name, attachment_size, attachment_mime,
-                 created_at
+                 reply_to_id, created_at
      )
      SELECT ins.id, ins.conversation_id, ins.sender_id, ins.body,
             ins.attachment_url, ins.attachment_type, ins.attachment_name, ins.attachment_size, ins.attachment_mime,
-            ins.created_at, u.username AS sender_username
+            ins.reply_to_id, ins.created_at,
+            rm.body AS reply_to_body,
+            rm.sender_id AS reply_to_sender_id,
+            rm.attachment_type AS reply_to_attachment_type,
+            rm.deleted_at AS reply_to_deleted_at,
+            ru.username AS reply_to_sender_username,
+            ru.display_name AS reply_to_sender_display_name,
+            u.username AS sender_username
        FROM inserted ins
-       JOIN users u ON u.id = ins.sender_id`,
+       JOIN users u ON u.id = ins.sender_id
+       LEFT JOIN messages rm ON rm.id = ins.reply_to_id
+       LEFT JOIN users ru ON ru.id = rm.sender_id`,
     [
       conversationId,
       senderId,
@@ -692,6 +784,7 @@ export async function createMessage(conversationId, senderId, body, attachment =
       attachmentName,
       attachmentSize,
       attachmentMime,
+      validReplyToId,
     ],
   );
   return formatMessageRow(rows[0]);

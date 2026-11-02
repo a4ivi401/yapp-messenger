@@ -35,6 +35,7 @@ export const api = {
   createConversation: (username) =>
     request('/api/conversations', { method: 'POST', body: JSON.stringify({ username }) }),
   getConversation: (id) => request(`/api/conversations/${id}`),
+  deleteConversation: (id) => request(`/api/conversations/${id}`, { method: 'DELETE' }),
   listMessages: (id, { limit, before, around } = {}) => {
     const params = new URLSearchParams();
     if (limit != null) params.set('limit', limit);

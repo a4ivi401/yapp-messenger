@@ -10,6 +10,7 @@ import {
   listMessages,
   listMessagesAround,
   createMessage,
+  deleteConversation,
   getConversationParticipantIds,
 } from '../conversations.js';
 import { isBlockedPair } from '../blocks.js';
@@ -40,6 +41,7 @@ const messageSchema = z
   .object({
     body: z.string().trim().max(4000).optional().default(''),
     attachment: attachmentSchema.optional().nullable(),
+    replyToId: z.string().uuid().optional().nullable(),
   })
   .refine(
     (data) => (data.body && data.body.length > 0) || Boolean(data.attachment),
@@ -182,6 +184,7 @@ conversationsRouter.post(
       me,
       parsed.data.body,
       parsed.data.attachment,
+      parsed.data.replyToId,
     );
 
     const io = req.app.get('io');
@@ -194,5 +197,32 @@ conversationsRouter.post(
     }
 
     res.status(201).json({ message });
+  }),
+);
+
+// DELETE /api/conversations/:id — видалення діалогу повністю (для обох співрозмовників)
+conversationsRouter.delete(
+  '/:id',
+  asyncHandler(async (req, res) => {
+    if (!uuid.safeParse(req.params.id).success) {
+      return res.status(404).json({ error: 'Діалог не знайдено' });
+    }
+
+    const conversationId = req.params.id;
+    const me = req.user.user_id;
+
+    const result = await deleteConversation(conversationId, me);
+    if (!result) {
+      return res.status(404).json({ error: 'Діалог не знайдено або немає прав' });
+    }
+
+    const io = req.app.get('io');
+    if (io) {
+      for (const pid of result.participantIds) {
+        io.to(`user:${pid}`).emit('conversation:deleted', { conversationId });
+      }
+    }
+
+    res.json({ ok: true, conversationId });
   }),
 );

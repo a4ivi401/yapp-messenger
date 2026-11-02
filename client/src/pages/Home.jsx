@@ -203,6 +203,23 @@ export default function Home() {
   const [editingMessageId, setEditingMessageId] = useState(null);
   const editingMessageIdRef = useRef(null);
 
+  // Режим відповіді (reply) та свайп повідомлень
+  const [replyingTo, setReplyingTo] = useState(null);
+  const [swipingMessage, setSwipingMessage] = useState(null); // { id, offset }
+  const swipingMessageRef = useRef(null);
+  swipingMessageRef.current = swipingMessage;
+  const [deleteMessageTarget, setDeleteMessageTarget] = useState(null);
+  const [deleteConversationTarget, setDeleteConversationTarget] = useState(null);
+  const textInputRef = useRef(null);
+  const touchStateRef = useRef({
+    startX: 0,
+    startY: 0,
+    msgId: null,
+    isSwiping: false,
+    timer: null,
+    hapticFired: false,
+  });
+
   // Результати пошуку по тілах повідомлень та по контактах (день 10)
   const [searchMessageResults, setSearchMessageResults] = useState([]);
   const [searchContacts, setSearchContacts] = useState([]);
@@ -337,26 +354,32 @@ export default function Home() {
     setStagedAttachment(null);
     setUploadError(null);
     setContextMenu(null);
+    setReplyingTo(null);
     if (editingMessageIdRef.current) {
       setEditingMessageId(null);
       editingMessageIdRef.current = null;
-      // Скидання قبل першого рендеру нового чата — inputText чиститься вручну нижче
+      // Скидання перед першим рендером нового чата — inputText чиститься вручну нижче
       setInputText('');
     }
     if (fileInputRef.current) fileInputRef.current.value = '';
   }, [activeChat?.id]);
 
-  // Закриття контекстного меню: Esc, клік будь-де, скрол чата.
-  // Внутрішні кліки меню зупиняють обидві події (mousedown + click), тож глобальний
-  // closer їх не бачить; інакше mousedown закрив би меню до активації пункту.
+  // Закриття контекстного меню та модальних вікон: Esc, клік будь-де, скрол чата.
   useEffect(() => {
-    if (!contextMenu) return undefined;
-
     const onKeyDown = (e) => {
-      if (e.key === 'Escape') setContextMenu(null);
+      if (e.key === 'Escape') {
+        if (contextMenu) setContextMenu(null);
+        if (replyingTo) setReplyingTo(null);
+        if (deleteMessageTarget) setDeleteMessageTarget(null);
+        if (deleteConversationTarget) setDeleteConversationTarget(null);
+      }
     };
-    const onMouseDown = () => setContextMenu(null);
-    const onScroll = () => setContextMenu(null);
+    const onMouseDown = () => {
+      if (contextMenu) setContextMenu(null);
+    };
+    const onScroll = () => {
+      if (contextMenu) setContextMenu(null);
+    };
 
     window.addEventListener('keydown', onKeyDown);
     window.addEventListener('mousedown', onMouseDown);
@@ -366,7 +389,7 @@ export default function Home() {
       window.removeEventListener('mousedown', onMouseDown);
       window.removeEventListener('wheel', onScroll);
     };
-  }, [contextMenu]);
+  }, [contextMenu, replyingTo, deleteMessageTarget, deleteConversationTarget]);
 
   // Зливає присутність із REST-відповідей у live-мапу.
   // Потрібно після перепідключення: сервер міг перезапуститися, і в мапі
@@ -939,6 +962,14 @@ export default function Home() {
       if (conversationId && messageId) applyMessageDelete(conversationId, messageId);
     });
 
+    socket.on('conversation:deleted', ({ conversationId }) => {
+      if (!conversationId) return;
+      setConversations((prev) => prev.filter((c) => c.id !== conversationId));
+      if (activeChatRef.current?.id === conversationId) {
+        setActiveChat(null);
+      }
+    });
+
     socket.on('stranger:updated', ({ message }) => {
       if (!message) return;
       const chat = activeChatRef.current;
@@ -1459,7 +1490,7 @@ export default function Home() {
 
   // Спільна відправка для тексту з вкладенням і для голосових: сокет з ack, фолбек REST.
   // Текст може бути порожнім — сервер (Zod-схема) приймає вкладення без тіла.
-  const dispatchMessage = async (text, attachment) => {
+  const dispatchMessage = async (text, attachment, replyToId = null) => {
     if (!activeChat) return;
     stopTyping();
 
@@ -1468,7 +1499,7 @@ export default function Home() {
       if (socketRef.current?.connected) {
         socketRef.current.emit(
           'stranger:message',
-          { sessionId, body: text, attachment },
+          { sessionId, body: text, attachment, replyToId },
           (res) => {
             if (!res?.ok) {
               console.error('Failed to send stranger message:', res?.error);
@@ -1491,7 +1522,7 @@ export default function Home() {
     if (socketRef.current?.connected) {
       socketRef.current.emit(
         'message:send',
-        { conversationId: activeChat.id, body: text, attachment },
+        { conversationId: activeChat.id, body: text, attachment, replyToId },
         (res) => {
           if (!res?.ok) {
             console.error('Failed to send message via socket:', res?.error);
@@ -1499,7 +1530,7 @@ export default function Home() {
               showRateLimitNotice(res.error);
             } else {
               // Фолбек на REST у разі помилки сокета
-              api.sendMessage(activeChat.id, text, attachment).catch(console.error);
+              api.sendMessage(activeChat.id, { body: text, attachment, replyToId }).catch(console.error);
             }
           }
         },
@@ -1507,7 +1538,7 @@ export default function Home() {
     } else {
       // Фолбек на REST, якщо сокет тимчасово від'єднано
       try {
-        await api.sendMessage(activeChat.id, text, attachment);
+        await api.sendMessage(activeChat.id, { body: text, attachment, replyToId });
       } catch (err) {
         console.error('Failed to send message via REST:', err);
       }
@@ -1548,26 +1579,139 @@ export default function Home() {
       return;
     }
 
+    const replyToId = replyingTo?.id || null;
+    setReplyingTo(null);
     setInputText('');
     setStagedAttachment(null);
     setUploadError(null);
     if (fileInputRef.current) fileInputRef.current.value = '';
-    dispatchMessage(text, attachment);
+    dispatchMessage(text, attachment, replyToId);
   };
 
   // ============ Контекстне меню, реакції, редагування/видалення (день 10) ============
 
-  // Відкриття меню на повідомленні: позиція обрізається до країв вікна
-  const handleOpenContextMenu = (e, msg) => {
-    if (msg.type === 'system' || msg.deleted) return; // tombstone та системні — без дій
-    e.preventDefault();
-    const x = Math.min(e.clientX, window.innerWidth - CONTEXT_MENU_W - 8);
-    const y = Math.min(e.clientY, window.innerHeight - CONTEXT_MENU_H - 8);
+  // Відкриття контекстного меню з обчисленням координат у межах вікна
+  const openMessageContextMenu = (clientX, clientY, msg) => {
+    if (msg.type === 'system' || msg.deleted) return;
+    const CONTEXT_MENU_W = 220;
+    const CONTEXT_MENU_H = 220;
+    const pad = 12;
 
+    const x = Math.max(
+      pad,
+      Math.min(clientX - CONTEXT_MENU_W / 2, window.innerWidth - CONTEXT_MENU_W - pad),
+    );
+    const y = Math.max(
+      pad,
+      Math.min(clientY - 50, window.innerHeight - CONTEXT_MENU_H - pad),
+    );
     setContextMenu({ msg, x, y });
   };
 
+  const handleOpenContextMenu = (e, msg) => {
+    if (msg.type === 'system' || msg.deleted) return; // tombstone та системні — без дій
+    e.preventDefault();
+    openMessageContextMenu(e.clientX, e.clientY, msg);
+  };
+
   const closeContextMenu = () => setContextMenu(null);
+
+  const handleStartReply = (msg) => {
+    if (!msg || msg.deleted || msg.type === 'system') return;
+    if (editingMessageIdRef.current) cancelEditMessage();
+    setReplyingTo(msg);
+    setTimeout(() => {
+      textInputRef.current?.focus();
+    }, 50);
+  };
+
+  const handleJumpToMessage = (targetMessageId) => {
+    if (!targetMessageId) return;
+    if (!scrollAndHighlight(targetMessageId)) {
+      if (activeChat?.type === 'direct') {
+        openDirectConversation(activeChat, targetMessageId);
+      }
+    }
+  };
+
+  // Тач-жести на повідомленнях: затискання (меню) та свайп вліво (відповідь)
+  const handleMessageTouchStart = (e, msg) => {
+    if (msg.type === 'system' || msg.deleted) return;
+    const touch = e.touches[0];
+    const state = touchStateRef.current;
+    if (state.timer) clearTimeout(state.timer);
+
+    state.startX = touch.clientX;
+    state.startY = touch.clientY;
+    state.msgId = msg.id;
+    state.isSwiping = false;
+    state.hapticFired = false;
+
+    state.timer = setTimeout(() => {
+      if (state.isSwiping) return;
+      if (navigator.vibrate) navigator.vibrate(40);
+      openMessageContextMenu(state.startX, state.startY, msg);
+      state.timer = null;
+    }, 450);
+  };
+
+  const handleMessageTouchMove = (e, msg) => {
+    const state = touchStateRef.current;
+    if (state.msgId !== msg.id) return;
+
+    const touch = e.touches[0];
+    const diffX = touch.clientX - state.startX;
+    const diffY = touch.clientY - state.startY;
+
+    if (Math.hypot(diffX, diffY) > 10 && state.timer) {
+      clearTimeout(state.timer);
+      state.timer = null;
+    }
+
+    if (diffX < -10 && Math.abs(diffX) > Math.abs(diffY)) {
+      state.isSwiping = true;
+      const offset = Math.max(-75, diffX);
+      setSwipingMessage({ id: msg.id, offset });
+
+      if (offset <= -50 && !state.hapticFired) {
+        state.hapticFired = true;
+        if (navigator.vibrate) navigator.vibrate(25);
+      }
+    } else if (state.isSwiping && diffX >= 0) {
+      setSwipingMessage(null);
+    }
+  };
+
+  const handleMessageTouchEnd = (e, msg) => {
+    const state = touchStateRef.current;
+    if (state.timer) {
+      clearTimeout(state.timer);
+      state.timer = null;
+    }
+
+    if (state.msgId === msg.id && state.isSwiping) {
+      if (swipingMessageRef.current?.id === msg.id && swipingMessageRef.current.offset <= -50) {
+        handleStartReply(msg);
+      }
+    }
+
+    state.msgId = null;
+    state.isSwiping = false;
+    state.hapticFired = false;
+    setSwipingMessage(null);
+  };
+
+  const handleMessageTouchCancel = () => {
+    const state = touchStateRef.current;
+    if (state.timer) {
+      clearTimeout(state.timer);
+      state.timer = null;
+    }
+    state.msgId = null;
+    state.isSwiping = false;
+    state.hapticFired = false;
+    setSwipingMessage(null);
+  };
 
   const cancelEditMessage = () => {
     setEditingMessageId(null);
@@ -1661,7 +1805,7 @@ export default function Home() {
     [user.id, activeChat, conversations],
   );
 
-  // Дія з меню: реакція / копіювання / редагування / видалення
+  // Дія з меню: реакція / відповідь / копіювання / редагування / видалення
   const handleMenuAction = (action, emoji) => {
     if (!contextMenu) return;
     const msg = contextMenu.msg;
@@ -1672,8 +1816,12 @@ export default function Home() {
       return;
     }
 
+    if (action === 'reply') {
+      handleStartReply(msg);
+      return;
+    }
+
     if (action === 'copy') {
-      // navigator.clipboard вимагає secure context; fallback — ручне виділення
       if (navigator.clipboard?.writeText) {
         navigator.clipboard.writeText(msg.body).catch(() => {});
       } else {
@@ -1690,19 +1838,44 @@ export default function Home() {
     }
 
     if (action === 'delete') {
-      const socketFn = activeChat.type === 'stranger' ? 'stranger:delete' : 'message:delete';
-      const idPayload =
-        activeChat.type === 'stranger'
-          ? {
-              sessionId: strangerSessionRef.current?.sessionId || activeChat.id,
-              messageId: msg.id,
-            }
-          : { messageId: msg.id };
-      if (socketRef.current?.connected) {
-        socketRef.current.emit(socketFn, idPayload, (res) => {
-          if (!res?.ok) console.error('Failed to delete message:', res?.error);
-        });
+      setDeleteMessageTarget(msg);
+    }
+  };
+
+  // Підтверджене видалення повідомлення
+  const handleDeleteMessageConfirmed = () => {
+    if (!deleteMessageTarget) return;
+    const msg = deleteMessageTarget;
+    setDeleteMessageTarget(null);
+    const socketFn = activeChat.type === 'stranger' ? 'stranger:delete' : 'message:delete';
+    const idPayload =
+      activeChat.type === 'stranger'
+        ? {
+            sessionId: strangerSessionRef.current?.sessionId || activeChat.id,
+            messageId: msg.id,
+          }
+        : { messageId: msg.id };
+    if (socketRef.current?.connected) {
+      socketRef.current.emit(socketFn, idPayload, (res) => {
+        if (!res?.ok) console.error('Failed to delete message:', res?.error);
+      });
+    }
+  };
+
+  // Підтверджене видалення діалогу
+  const handleDeleteConversationConfirmed = async () => {
+    if (!deleteConversationTarget) return;
+    const convId = deleteConversationTarget.id;
+    setDeleteConversationTarget(null);
+    try {
+      await api.deleteConversation(convId);
+      setConversations((prev) => prev.filter((c) => c.id !== convId));
+      if (activeChat?.id === convId) {
+        setActiveChat(null);
       }
+    } catch (err) {
+      console.error('Failed to delete conversation:', err);
+      alert(err.message || 'Не вдалося видалити діалог');
     }
   };
 
@@ -1761,7 +1934,9 @@ export default function Home() {
       });
       const res = await api.uploadFile(file);
       if (res?.attachment) {
-        dispatchMessage('', res.attachment);
+        const replyToId = replyingTo?.id || null;
+        setReplyingTo(null);
+        dispatchMessage('', res.attachment, replyToId);
       }
     } catch (err) {
       console.error('Failed to send voice message:', err);
@@ -2201,6 +2376,11 @@ export default function Home() {
                           openDirectConversation(conv);
                           setSearchQuery('');
                         }}
+                        onContextMenu={(e) => {
+                          e.preventDefault();
+                          e.stopPropagation();
+                          setDeleteConversationTarget(conv);
+                        }}
                       >
                         <div className="chat-row-avatar">
                           {conv.otherUser?.avatarUrl ? (
@@ -2436,6 +2616,11 @@ export default function Home() {
                       key={conv.id}
                       className={`chat-row ${isActive ? 'active' : ''} ${unread > 0 ? 'has-unread' : ''}`}
                       onClick={() => openDirectConversation(conv)}
+                      onContextMenu={(e) => {
+                        e.preventDefault();
+                        e.stopPropagation();
+                        setDeleteConversationTarget(conv);
+                      }}
                     >
                       <div className="chat-row-avatar">
                         {conv.otherUser.avatarUrl ? (
@@ -2591,6 +2776,17 @@ export default function Home() {
                     🚫 Скарга / Блок
                   </button>
                 )}
+                {activeChat.type === 'direct' && (
+                  <button
+                    type="button"
+                    className="chat-header-delete-btn"
+                    onClick={() => setDeleteConversationTarget(activeChat)}
+                    title="Видалити діалог"
+                    aria-label="Видалити діалог"
+                  >
+                    🗑
+                  </button>
+                )}
                 <button
                   className="leave-chat-btn"
                   onClick={handleBackToList}
@@ -2677,6 +2873,8 @@ export default function Home() {
                         isMe && activeChat.type === 'direct'
                           ? outgoingStatus(msg, receipts[activeChat.id])
                           : null;
+                      const isSwiping = swipingMessage?.id === msg.id;
+                      const swipeOffset = isSwiping ? swipingMessage.offset : 0;
                       return (
                         <div
                           key={msg.id}
@@ -2685,8 +2883,59 @@ export default function Home() {
                           }`}
                           data-message-id={msg.id}
                           onContextMenu={(e) => handleOpenContextMenu(e, msg)}
+                          onTouchStart={(e) => handleMessageTouchStart(e, msg)}
+                          onTouchMove={(e) => handleMessageTouchMove(e, msg)}
+                          onTouchEnd={(e) => handleMessageTouchEnd(e, msg)}
+                          onTouchCancel={(e) => handleMessageTouchCancel(e, msg)}
                         >
-                          <div className="message-bubble">
+                          {isSwiping && (
+                            <div
+                              className={`message-swipe-indicator ${
+                                swipeOffset <= -50 ? 'is-ready' : ''
+                              }`}
+                            >
+                              <span>↩</span>
+                            </div>
+                          )}
+                          <div
+                            className="message-bubble"
+                            style={{
+                              transform: isSwiping ? `translateX(${swipeOffset}px)` : 'translateX(0)',
+                              transition: isSwiping ? 'none' : 'transform 0.22s cubic-bezier(0.2, 0.9, 0.3, 1)',
+                            }}
+                          >
+                            {msg.replyTo && (
+                              <div
+                                className="message-reply-quote"
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  handleJumpToMessage(msg.replyTo.id);
+                                }}
+                                title="Перейти до повідомлення"
+                              >
+                                <div className="message-reply-quote-bar" />
+                                <div className="message-reply-quote-content">
+                                  <div className="message-reply-quote-author">
+                                    {msg.replyTo.senderId === user.id
+                                      ? 'Ви'
+                                      : msg.replyTo.senderDisplayName ||
+                                        msg.replyTo.senderUsername ||
+                                        msg.replyTo.senderAnonName ||
+                                        'Співрозмовник'}
+                                  </div>
+                                  <div className="message-reply-quote-text">
+                                    {msg.replyTo.deleted
+                                      ? 'Повідомлення видалено'
+                                      : msg.replyTo.body ||
+                                        (msg.replyTo.attachmentType === 'image'
+                                          ? '📷 Фото'
+                                          : msg.replyTo.attachmentType === 'audio'
+                                            ? '🎤 Голосове'
+                                            : '📎 Файл')}
+                                  </div>
+                                </div>
+                              </div>
+                            )}
                             {activeChat.type === 'stranger' && !isMe && msg.senderAnonName && (
                               <div
                                 style={{
@@ -2964,6 +3213,43 @@ export default function Home() {
                             </button>
                           </div>
                         )}
+                        {/* Рядок-підказка режиму відповіді */}
+                        {replyingTo && (
+                          <div className="reply-mode-bar">
+                            <div className="reply-mode-bar-content">
+                              <span className="reply-mode-bar-title">
+                                ↩ Відповідь{' '}
+                                <strong>
+                                  {replyingTo.senderId === user.id
+                                    ? 'собі'
+                                    : replyingTo.senderDisplayName ||
+                                      replyingTo.senderUsername ||
+                                      replyingTo.senderAnonName ||
+                                      'співрозмовнику'}
+                                </strong>
+                              </span>
+                              <span className="reply-mode-bar-snippet">
+                                {replyingTo.deleted
+                                  ? 'Повідомлення видалено'
+                                  : replyingTo.body ||
+                                    (replyingTo.attachment?.type === 'image'
+                                      ? '📷 Фото'
+                                      : replyingTo.attachment?.type === 'audio'
+                                        ? '🎤 Голосове повідомлення'
+                                        : '📎 Файл')}
+                              </span>
+                            </div>
+                            <button
+                              type="button"
+                              className="staging-clear-btn"
+                              onClick={() => setReplyingTo(null)}
+                              title="Скасувати відповідь"
+                              aria-label="Скасувати відповідь"
+                            >
+                              ✕
+                            </button>
+                          </div>
+                        )}
                         <form className="chat-input-bar" onSubmit={handleSendMessage}>
                         <input
                           ref={fileInputRef}
@@ -2991,13 +3277,16 @@ export default function Home() {
                           🎤
                         </button>
                         <input
+                          ref={textInputRef}
                           type="text"
                           placeholder={
                             editingMessageId
                               ? 'Редагуєте повідомлення...'
-                              : stagedAttachment
-                                ? 'Додайте підпис або надішліть...'
-                                : 'Напишіть повідомлення...'
+                              : replyingTo
+                                ? 'Ваша відповідь...'
+                                : stagedAttachment
+                                  ? 'Додайте підпис або надішліть...'
+                                  : 'Напишіть повідомлення...'
                           }
                           value={inputText}
                           onChange={handleInputChange}
@@ -3410,60 +3699,143 @@ export default function Home() {
           </div>
         </div>
       )}
-      {/* КОНТЕКСТНЕ МЕНЮ ПОВІДОМЛЕННЯ (right-click) */}
+      {/* КОНТЕКСТНЕ МЕНЮ ПОВІДОМЛЕННЯ (right-click / довгий тап) */}
       {contextMenu && (
-        <div
-          className="context-menu"
-          style={{ left: contextMenu.x, top: contextMenu.y }}
-          // Стоп-продаж обом фазам: тільки так глобальний mousedown-closer
-          // не закриє меню перед тим, як клік по пункту встигне відпрацювати
-          onMouseDown={(e) => e.stopPropagation()}
-          onClick={(e) => e.stopPropagation()}
-          onContextMenu={(e) => {
-            e.preventDefault();
-            e.stopPropagation();
-            setContextMenu(null);
-          }}
-        >
-          <div className="context-menu-actions">
-            {REACTION_EMOJIS.map((emoji) => {
-              const isMine = Boolean(
-                contextMenu.msg.reactions?.[emoji]?.userIds?.includes(user.id),
-              );
-              return (
-                <button
-                  key={emoji}
-                  type="button"
-                  className={`context-menu-reaction ${isMine ? 'is-mine' : ''}`}
-                  onClick={() => handleMenuAction('react', emoji)}
-                  title={isMine ? 'Прибрати реакцію' : 'Поставити реакцію'}
-                >
-                  {emoji}
-                </button>
-              );
-            })}
-          </div>
-          <button type="button" className="context-menu-item" onClick={() => handleMenuAction('copy')}>
-            📋 Копіювати
-          </button>
-          {isMessageMine(contextMenu.msg) && contextMenu.msg.body?.trim() && (
+        <>
+          <div
+            className="context-menu-backdrop"
+            onClick={closeContextMenu}
+            onTouchStart={closeContextMenu}
+          />
+          <div
+            className="context-menu"
+            style={{ left: contextMenu.x, top: contextMenu.y }}
+            // Стоп-продаж обом фазам: тільки так глобальний mousedown-closer
+            // не закриє меню перед тим, як клік по пункту встигне відпрацювати
+            onMouseDown={(e) => e.stopPropagation()}
+            onClick={(e) => e.stopPropagation()}
+            onContextMenu={(e) => {
+              e.preventDefault();
+              e.stopPropagation();
+              setContextMenu(null);
+            }}
+          >
+            <div className="context-menu-actions">
+              {REACTION_EMOJIS.map((emoji) => {
+                const isMine = Boolean(
+                  contextMenu.msg.reactions?.[emoji]?.userIds?.includes(user.id),
+                );
+                return (
+                  <button
+                    key={emoji}
+                    type="button"
+                    className={`context-menu-reaction ${isMine ? 'is-mine' : ''}`}
+                    onClick={() => handleMenuAction('react', emoji)}
+                    title={isMine ? 'Прибрати реакцію' : 'Поставити реакцію'}
+                  >
+                    {emoji}
+                  </button>
+                );
+              })}
+            </div>
             <button
               type="button"
               className="context-menu-item"
-              onClick={() => handleMenuAction('edit')}
+              onClick={() => handleMenuAction('reply')}
             >
-              ✏️ Редагувати
+              ↩ Відповісти
             </button>
-          )}
-          {isMessageMine(contextMenu.msg) && (
-            <button
-              type="button"
-              className="context-menu-item is-danger"
-              onClick={() => handleMenuAction('delete')}
-            >
-              🗑 Видалити
+            <button type="button" className="context-menu-item" onClick={() => handleMenuAction('copy')}>
+              📋 Копіювати
             </button>
-          )}
+            {isMessageMine(contextMenu.msg) && contextMenu.msg.body?.trim() && (
+              <button
+                type="button"
+                className="context-menu-item"
+                onClick={() => handleMenuAction('edit')}
+              >
+                ✏️ Редагувати
+              </button>
+            )}
+            {isMessageMine(contextMenu.msg) && (
+              <button
+                type="button"
+                className="context-menu-item is-danger"
+                onClick={() => handleMenuAction('delete')}
+              >
+                🗑 Видалити
+              </button>
+            )}
+          </div>
+        </>
+      )}
+
+      {/* МОДАЛЬНЕ ВІКНО ПІДТВЕРДЖЕННЯ ВИДАЛЕННЯ ПОВІДОМЛЕННЯ */}
+      {deleteMessageTarget && (
+        <div
+          className="confirm-modal-overlay"
+          onClick={() => setDeleteMessageTarget(null)}
+        >
+          <div className="confirm-modal-sheet" onClick={(e) => e.stopPropagation()}>
+            <div className="confirm-modal-icon is-danger">🗑</div>
+            <h3>Видалити повідомлення?</h3>
+            <p>Це повідомлення буде видалено для всіх учасників діалогу.</p>
+            <div className="confirm-modal-actions">
+              <button
+                type="button"
+                className="confirm-modal-cancel-btn"
+                onClick={() => setDeleteMessageTarget(null)}
+              >
+                Скасувати
+              </button>
+              <button
+                type="button"
+                className="confirm-modal-delete-btn"
+                onClick={handleDeleteMessageConfirmed}
+              >
+                Видалити
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* МОДАЛЬНЕ ВІКНО ПІДТВЕРДЖЕННЯ ВИДАЛЕННЯ ДІАЛОГУ */}
+      {deleteConversationTarget && (
+        <div
+          className="confirm-modal-overlay"
+          onClick={() => setDeleteConversationTarget(null)}
+        >
+          <div className="confirm-modal-sheet" onClick={(e) => e.stopPropagation()}>
+            <div className="confirm-modal-icon is-danger">🗑</div>
+            <h3>Видалити діалог?</h3>
+            <p>
+              Видалити діалог з{' '}
+              <strong>
+                {deleteConversationTarget.otherUser?.displayName ||
+                  (deleteConversationTarget.otherUser?.username
+                    ? `@${deleteConversationTarget.otherUser.username}`
+                    : deleteConversationTarget.title || 'співрозмовником')}
+              </strong>
+              ? Всі повідомлення та медіафайли буде видалено назавжди для обох учасників.
+            </p>
+            <div className="confirm-modal-actions">
+              <button
+                type="button"
+                className="confirm-modal-cancel-btn"
+                onClick={() => setDeleteConversationTarget(null)}
+              >
+                Скасувати
+              </button>
+              <button
+                type="button"
+                className="confirm-modal-delete-btn"
+                onClick={handleDeleteConversationConfirmed}
+              >
+                Видалити діалог
+              </button>
+            </div>
+          </div>
         </div>
       )}
 

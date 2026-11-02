@@ -4,6 +4,7 @@ import { pool, query } from '../src/db.js';
 import {
   createMessage,
   deleteMessage,
+  deleteConversation,
   editMessage,
   findOrCreateDirectConversation,
   listMessages,
@@ -214,5 +215,55 @@ test('conversations.js: реакції, редагування, tombstone та �
     );
     assert.equal(rows[0].body, '');
     assert.ok(rows[0].deleted_at);
+  });
+
+  await t.test('replyTo: створення та завантаження повідомлення-відповіді', async () => {
+    const parentMsg = await createMessage(conversationId, senderId, 'Оригінальне повідомлення');
+    const replyMsg = await createMessage(
+      conversationId,
+      partnerId,
+      'Відповідь на оригінальне',
+      null,
+      parentMsg.id,
+    );
+
+    assert.ok(replyMsg.replyTo);
+    assert.equal(replyMsg.replyTo.id, parentMsg.id);
+    assert.equal(replyMsg.replyTo.body, 'Оригінальне повідомлення');
+    assert.equal(replyMsg.replyTo.senderId, senderId);
+
+    const { messages } = await listMessages(conversationId);
+    const loadedReply = messages.find((m) => m.id === replyMsg.id);
+    assert.ok(loadedReply?.replyTo);
+    assert.equal(loadedReply.replyTo.id, parentMsg.id);
+    assert.equal(loadedReply.replyTo.body, 'Оригінальне повідомлення');
+  });
+
+  await t.test('deleteConversation: видаляє діалог та каскадно всі його дані', async () => {
+    const userX = await createUser('x');
+    const userY = await createUser('y');
+    const { id: tempConvId } = await findOrCreateDirectConversation(userX, userY);
+
+    await createMessage(tempConvId, userX, 'Повідомлення перед видаленням');
+
+    // Сторонній не може видалити діалог
+    const failRes = await deleteConversation(tempConvId, outsiderId);
+    assert.equal(failRes, null);
+
+    // Учасник видаляє
+    const delRes = await deleteConversation(tempConvId, userX);
+    assert.ok(delRes);
+    assert.equal(delRes.conversationId, tempConvId);
+    assert.ok(delRes.participantIds.includes(userX));
+    assert.ok(delRes.participantIds.includes(userY));
+
+    // Діалог і повідомлення видалено
+    const { rows: convCheck } = await query('SELECT 1 FROM conversations WHERE id = $1', [tempConvId]);
+    assert.equal(convCheck.length, 0);
+
+    const { rows: msgCheck } = await query('SELECT 1 FROM messages WHERE conversation_id = $1', [tempConvId]);
+    assert.equal(msgCheck.length, 0);
+
+    await query('DELETE FROM users WHERE id = ANY($1::uuid[])', [[userX, userY]]);
   });
 });
