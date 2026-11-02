@@ -20,6 +20,7 @@ services:
     environment:
       DATABASE_URL: postgres://yapp:yapp_dev@postgres:5432/yapp
       PORT: 3001
+      COOKIE_SECURE: "${COOKIE_SECURE:-false}"
     depends_on:
       postgres:
         condition: service_healthy

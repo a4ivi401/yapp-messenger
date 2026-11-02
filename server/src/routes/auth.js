@@ -20,6 +20,17 @@ const credentials = z.object({
     .max(72, 'Пароль не може перевищувати 72 символи'),
 });
 
+const COOKIE_SECURE = process.env.COOKIE_SECURE === 'true' || process.env.NODE_ENV === 'production';
+
+function getSessionCookieOptions() {
+  return {
+    httpOnly: true,
+    sameSite: 'lax',
+    secure: COOKIE_SECURE,
+    maxAge: SESSION_HOURS * 3600 * 1000,
+  };
+}
+
 async function createSession(res, userId) {
   const token = crypto.randomBytes(32).toString('hex');
   const expiresAtMs = Date.now() + SESSION_HOURS * 3600 * 1000;
@@ -27,11 +38,7 @@ async function createSession(res, userId) {
     'INSERT INTO sessions (token, user_id, expires_at) VALUES ($1, $2, $3)',
     [token, userId, new Date(expiresAtMs)],
   );
-  res.cookie(SESSION_COOKIE, token, {
-    httpOnly: true,
-    sameSite: 'lax',
-    maxAge: SESSION_HOURS * 3600 * 1000,
-  });
+  res.cookie(SESSION_COOKIE, token, getSessionCookieOptions());
 }
 
 export const authRouter = Router();
@@ -91,7 +98,11 @@ authRouter.post('/login', async (req, res) => {
 
 authRouter.post('/logout', requireAuth, async (req, res) => {
   await query('DELETE FROM sessions WHERE token = $1', [req.cookies[SESSION_COOKIE]]);
-  res.clearCookie(SESSION_COOKIE);
+  res.clearCookie(SESSION_COOKIE, {
+    httpOnly: true,
+    sameSite: 'lax',
+    secure: COOKIE_SECURE,
+  });
   res.json({ ok: true });
 });
 

@@ -42,7 +42,7 @@ A messenger where you can chat with a random stranger, and if a **match** happen
 | **M1** | Live chat — the messenger core | 2–4 | ✅ done |
 | **M2** | Random stranger + matching (**twist**) | 5–6 | ✅ done |
 | **M3** | Statuses, media & extras | 7–11 | ✅ done |
-| **M4** | Deployment & defense prep | 12–14 | 🚧 12 ✅ · 13–14 planned |
+| **M4** | Deployment & defense prep | 12–14 | 🚧 12–13 ✅ · 14 planned |
 
 ### 📅 Day-by-day
 
@@ -62,7 +62,7 @@ Priority legend: 🟣 **core** (can't pass without it) · ⚪ **leftover** (only
 | **10** ✅ | Emoji reactions (1 user × 1 emoji, toggle, realtime in permanent and anonymous chats) + right-click context menu: reactions / copy / edit / tombstone delete + search across message bodies in all chats and a contacts filter in search results | ⚪ |
 | **11** ✅ | Block / report in the anonymous chat (persistent pair ban, migration 010, closed sessions buffer for safe reporting after leaving, report modal) + basic sliding-window rate limiting (Express middleware for auth/uploads/API + Socket.IO limiters) | ⚪ |
 | **12** ✅ | User profile editing & viewing (avatar upload/removal, username/display name, bio, partner profile inspection on header click, migration 011) + UI polish (empty states for chats/search/conversations, full Ukrainian Zod localization) | 🟣 polish |
-| **13** | Deployment (Railway / Fly), HTTPS, secure cookies, env vars | 🟣 |
+| **13** ✅ | Deployment (Docker Compose on VPS + Caddy HTTPS), secure cookies, env vars | 🟣 |
 | **14** | Buffer + two-tab demo + final README + defense prep | 🟣 |
 
 ### Priorities
