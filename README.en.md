@@ -42,7 +42,7 @@ A messenger where you can chat with a random stranger, and if a **match** happen
 | **M1** | Live chat — the messenger core | 2–4 | ✅ done |
 | **M2** | Random stranger + matching (**twist**) | 5–6 | ✅ done |
 | **M3** | Statuses, media & extras | 7–11 | ✅ done |
-| **M4** | Deployment & defense prep | 12–14 | 🚧 12–13 ✅ · 14 planned |
+| **M4** | Deployment & defense prep | 12–14 | ✅ done |
 
 ### 📅 Day-by-day
 
@@ -62,8 +62,8 @@ Priority legend: 🟣 **core** (can't pass without it) · ⚪ **leftover** (only
 | **10** ✅ | Emoji reactions (1 user × 1 emoji, toggle, realtime in permanent and anonymous chats) + right-click context menu: reactions / copy / edit / tombstone delete + search across message bodies in all chats and a contacts filter in search results | ⚪ |
 | **11** ✅ | Block / report in the anonymous chat (persistent pair ban, migration 010, closed sessions buffer for safe reporting after leaving, report modal) + basic sliding-window rate limiting (Express middleware for auth/uploads/API + Socket.IO limiters) | ⚪ |
 | **12** ✅ | User profile editing & viewing (avatar upload/removal, username/display name, bio, partner profile inspection on header click, migration 011) + UI polish (empty states for chats/search/conversations, full Ukrainian Zod localization) | 🟣 polish |
-| **13** ✅ | Deployment (Docker Compose on VPS + Caddy HTTPS), secure cookies, env vars | 🟣 |
-| **14** | Buffer + two-tab demo + final README + defense prep | 🟣 |
+| **13** ✅ | Deployment (Docker Compose on VPS + Caddy HTTPS), secure cookies, env vars + mobile gestures (swipe-to-reply, quote jumping, context menu, chat deletion, migration 012) | 🟣 |
+| **14** ✅ | Buffer + two-tab demo + final README + defense prep ([demo script & guide](docs/DEMO_AND_DEFENSE.md)) | 🟣 |
 
 ### Priorities
 
@@ -73,8 +73,8 @@ Priority legend: 🟣 **core** (can't pass without it) · ⚪ **leftover** (only
 - Chats and contacts list ✅
 - **Random stranger + matching → contact** — the main highlight at the defense ✅
 - Minimal statuses + "typing…" ✅
-- Responsive interface ✅
-- HTTPS deployment + demo + README ✅
+- Adaptive UI + mobile touch gestures (swipe-to-reply, quoting) ✅
+- HTTPS deployment + demo + README ([defense guide](docs/DEMO_AND_DEFENSE.md)) ✅
 
 **⚪ Leftover time** (add in this order, if time remains):
 1. Photos / files ✅
@@ -187,7 +187,8 @@ Upon connection, each authenticated user automatically joins their own private r
 |---|---|---|---|
 | `conversation:join` | `{ conversationId }` | `{ ok: true }` or `{ ok: false, error }` | Join room `conversation:<id>` (participants only) |
 | `conversation:leave` | `{ conversationId }` | `{ ok: true }` | Leave conversation room |
-| `message:send` | `{ conversationId, body?, attachment? }` | `{ ok: true, message }` or `{ ok: false, error }` | Persist message to DB and broadcast to conversation room & participant private rooms (supports text, media attachment, or both) |
+| `conversation:delete` | `{ conversationId }` | `{ ok: true }` | Participant deletes conversation; cascades in DB and broadcasts `conversation:deleted` |
+| `message:send` | `{ conversationId, body?, attachment?, replyToId? }` | `{ ok: true, message }` or `{ ok: false, error }` | Persist message to DB and broadcast to conversation room & participant private rooms (supports text, media attachment, reply/quoting, or combinations) |
 | `conversation:read` | `{ conversationId }` | `{ ok: true }` | Mark all incoming messages of the conversation as read (lifts the watermark) and notify the partner via `message:read`. Repeating with no new incoming messages is a no-op with no broadcast |
 | `message:delivered` | `{ messageId }` | `{ ok: true }` | Delivery acknowledgement from the recipient; the sender receives `message:delivered` |
 | `typing` | `{ conversationId, isTyping }` | `{ ok: true }` or `{ ok: false, error }` | "Typing…" indicator in a direct chat. The server only relays the event (stateless); starts are throttled to 500 ms per recipient |
@@ -197,7 +198,7 @@ Upon connection, each authenticated user automatically joins their own private r
 | `stranger:typing` | `{ sessionId, isTyping }` | `{ ok: true }` or `{ ok: false, error }` | Same for the anonymous chat |
 | `stranger:search` | — | `{ ok: true, status }` | Start searching for a random stranger or enter the FIFO queue |
 | `stranger:cancel` | — | `{ ok: true }` | Cancel search and remove from queue |
-| `stranger:message` | `{ sessionId, body?, attachment? }` | `{ ok: true, message }` | Send an ephemeral message to the stranger (text up to 4000 characters, media attachment, or both) |
+| `stranger:message` | `{ sessionId, body?, attachment?, replyToId? }` | `{ ok: true, message }` | Send an ephemeral message to the stranger (text up to 4000 characters, media attachment, reply quote, or combinations) |
 | `stranger:next` | — | `{ ok: true, status }` | Skip current stranger («🎲 Next»): record session exclusion to prevent re-matching and search for a new partner |
 | `stranger:leave` | — | `{ ok: true }` | Leave stranger chat and mark mutual exclusion in session |
 | `stranger:match-request` | `{ sessionId }` | `{ ok: true, mutual }` | Send contact request («🤝 Add to contacts»). When mutual, saves messages to DB and reveals identities |
@@ -228,6 +229,7 @@ Upon connection, each authenticated user automatically joins their own private r
 | `message:reaction` | `{ conversationId, messageId, reactions }` | Reaction aggregate `{ emoji: { count, userIds } }` after a toggle. Sent to the conversation room and participants' private rooms |
 | `message:updated` | `{ message }` | Message was edited (`editedAt` set) — the client replaces its local copy |
 | `message:deleted` | `{ conversationId, messageId }` | Message tombstoned: the client builds the tombstone locally from the lightweight payload |
+| `conversation:deleted` | `{ conversationId }` | Conversation deleted by participant: clients immediately prune the row and reset active chat |
 | `stranger:reaction` | `{ sessionId, messageId, reactions }` | Reaction aggregate of an ephemeral message after a toggle |
 | `stranger:updated` | `{ message }` | Ephemeral message edited or tombstone-deleted in the anonymous chat |
 
@@ -242,14 +244,17 @@ yapp-messenger/
   client/
     Dockerfile            # build React → nginx proxying to the server
     nginx.template.conf   # static files + /api, /socket.io proxy
+  docs/
+    DEMO_AND_DEFENSE.md   # step-by-step live demo script & defense Q&A cheat sheet
 ```
 
-## Security
+## Security & Production
 
-- Passwords — `crypto.scrypt` with a random salt (`salt:hash`), verified with `timingSafeEqual`.
-- Sessions — random token stored in DB, carried only in an httpOnly cookie.
-- Parameterized SQL everywhere; input validated with zod.
-- File uploads — 100 MB size limit, dangerous/executable extension blocking (.exe, .bat, .sh, .php, etc.), UUID storage filename validation preventing path traversal, isolated `uploads` volume.
-- Rate limiting — in-memory sliding window: protects authentication (20 attempts/min), uploads (30/min), global API (300/min), and socket events (message sends, stranger search, reports). Standard RFC headers `RateLimit-*` and HTTP 429 status.
-- Blocking & Safety — persistent user blocklists (`user_blocks` table), bidirectional messaging block and exclusion from stranger roulette, moderation report system (`reports` table).
-- Planned: HTTPS on deployment.
+- **HTTPS & TLS** — deployed live at [https://yapp.a4ivi4.dev](https://yapp.a4ivi4.dev) via Caddy with automatic Let's Encrypt certificates and HTTP-to-HTTPS redirect.
+- **Passwords** — `crypto.scrypt` with a random salt (`salt:hash`), verified with `timingSafeEqual`.
+- **Sessions & Cookies** — 256-bit random cryptographic token stored in DB, carried strictly in `httpOnly`, `SameSite=lax`, and `Secure` (via `COOKIE_SECURE=true`) cookie `sid`.
+- **Database** — parameterized SQL everywhere (`$1`); input validated with zod; row ownership checks inside SQL queries.
+- **File uploads** — 100 MB size limit, dangerous/executable extension blocking (.exe, .bat, .sh, .php, etc.), UUID storage filename validation preventing path traversal, isolated `uploads` volume.
+- **Rate limiting** — in-memory sliding window: protects authentication (20 attempts/min), uploads (30/min), global API (300/min), and socket events (message sends, stranger search, reports). Standard RFC headers `RateLimit-*` and HTTP 429 status.
+- **Blocking & Safety** — persistent user blocklists (`user_blocks` table), bidirectional messaging block and exclusion from stranger roulette, moderation report system (`reports` table).
+- **Live Demo & Defense Guide** — full presentation guide with timing and answers to examiner questions in [docs/DEMO_AND_DEFENSE.md](docs/DEMO_AND_DEFENSE.md).
